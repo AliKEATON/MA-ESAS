@@ -1,0 +1,51 @@
+【优先级排序】
+🔴 第一优先级（必须先做，其他功能的基础）
+Pydantic Schemas 实现 backend/app/schemas/
+为所有 API 端点定义请求/响应 Schema
+依赖：无
+工作量：中等（~2-3 小时）
+产出：5 个 Schema 文件（user、product、analysis、conversation）
+
+FastAPI 认证路由 backend/app/api/auth.py
+实现注册、登录、获取当前用户
+依赖：Schemas、config.py、database.py
+工作量：中等（~2-3 小时）
+产出：完整的认证系统（JWT + 密码加密）
+
+🟠 第二优先级（核心业务逻辑）
+爬虫模块实现 backend/app/crawlers/
+实现 DrissionPage 爬虫 + 数据清洗
+依赖：config.py、database.py
+工作量：较大（~4-5 小时）
+产出：可工作的爬虫，能采集京东评论
+
+FastAPI 商品与对话路由 backend/app/api/products.py + conversations.py
+实现商品提交、对话管理
+依赖：Schemas、爬虫模块
+工作量：中等（~3-4 小时）
+产出：商品和对话的 CRUD 接口
+
+🟡 第三优先级（AI 核心）
+LangGraph 多智能体工作流 backend/app/agents/
+实现 Router / SQL Agent / RAG Agent / Synthesizer
+依赖：database.py、config.py、DeepSeek API Key
+工作量：较大（~6-8 小时）
+产出：完整的多智能体分析流程
+
+FastAPI 分析路由 backend/app/api/analysis.py
+触发分析任务、查询进度、获取结果
+依赖：LangGraph 工作流
+工作量：中等（~2-3 小时）
+产出：异步分析任务管理
+
+🟢 第四优先级（前端与优化）
+Streamlit 前端页面 frontend/pages/
+实现聊天页面、历史记录、设置页面
+依赖：API 客户端、后端 API 完成
+工作量：较大（~5-6 小时）
+产出：完整的用户界面
+
+提示词优化与测试
+调优 DeepSeek 提示词
+系统测试与性能优化
+工作量：中等（~3-4 小时）

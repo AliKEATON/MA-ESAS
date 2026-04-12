@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 环境变量（含密钥，绝对不提交）
+.env
+
+# 日志
+logs/
+*.log
+
+# 数据文件
+data/
+论文报告/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/secrets.toml
+
+# ChromaDB 持久化数据
+chroma/
+
+# DuckDB 数据文件
+*.duckdb
+*.duckdb.wal
+
+# 测试覆盖率
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Alembic
+alembic/versions/*.pyc
