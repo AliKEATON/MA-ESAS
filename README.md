@@ -93,7 +93,7 @@ cd backend
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 # 终端 2：启动 Streamlit 前端
-streamlit run frontend/app.py --server.port 8501
+streamlit run frontend-streamlit/app.py --server.port 8501
 ```
 
 **方式二：使用脚本启动（可选）**

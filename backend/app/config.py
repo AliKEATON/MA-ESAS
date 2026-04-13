@@ -87,6 +87,7 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FILE_PATH = os.getenv("LOG_FILE_PATH", str(LOGS_DIR / "app.log"))
 LOG_MAX_SIZE = os.getenv("LOG_MAX_SIZE", "500MB")
 LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", 7))
+SQL_ECHO = os.getenv("SQL_ECHO", "False").lower() == "true"
 
 # ========== 系统配置 ==========
 # 允许的商品链接来源

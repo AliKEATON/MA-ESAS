@@ -8,12 +8,12 @@ from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import QueuePool
 import duckdb
 import chromadb
-from loguru import logger
+from app.utils.logger import logger
 from app.config import (
     SQLALCHEMY_DATABASE_URL,
     DUCKDB_PATH,
     CHROMADB_PATH,
-    ENVIRONMENT,
+    SQL_ECHO,
 )
 
 # ========== MySQL 连接 ==========
@@ -24,7 +24,7 @@ engine = create_engine(
     pool_size=10,
     max_overflow=20,
     pool_pre_ping=True,  # 连接前检查连接是否有效
-    echo=ENVIRONMENT == "development",  # 开发环境打印 SQL
+    echo=SQL_ECHO,  # 是否打印原始 SQL，默认关闭，必要时通过环境变量开启
 )
 
 # 创建 Session 工厂

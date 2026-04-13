@@ -6,9 +6,12 @@ from datetime import datetime, timezone
 from typing import Any
 import uuid
 
-from loguru import logger
 from sqlalchemy.orm import Session
 
+from app.agents.rag_agent import RAGAgent
+from app.agents.router_agent import RouterAgent
+from app.agents.sql_agent import SQLAgent
+from app.agents.synthesizer_agent import SynthesizerAgent
 from app.db.database import SessionLocal
 from app.models import AnalysisReport, AnalysisTask, Conversation, Message, Product
 from app.models.analysis_task import AnalysisTaskStatus
@@ -16,6 +19,7 @@ from app.models.conversation import MessageRole, MessageType
 from app.models.product import ProductStatus
 from app.services.crawler_service import CrawlerService
 from app.utils.link_extractor import LinkExtractor
+from app.utils.logger import logger
 
 
 class AnalysisService:
@@ -25,6 +29,7 @@ class AnalysisService:
         ("link_extract", "Link extraction"),
         ("crawl_check", "Crawl freshness check"),
         ("crawling", "Crawler collection"),
+        ("router_agent", "Query routing"),
         ("sql_agent", "SQL aggregation"),
         ("rag_agent", "Semantic retrieval"),
         ("synthesizer", "Result synthesis"),
@@ -182,48 +187,87 @@ class AnalysisService:
         return task
 
     @staticmethod
-    def _build_summary(product: Product, stats: dict[str, Any], evidence_count: int) -> str:
-        total_count = stats.get("total_count", 0)
-        avg_score = stats.get("avg_score", 0)
-        if total_count <= 0:
-            return (
-                f"Product {product.external_product_id} currently has no captured comments. "
-                "The task completed, but there is not enough review data to generate deeper insights yet."
-            )
-        return (
-            f"Product {product.external_product_id} has {total_count} captured comments with an average score of "
-            f"{avg_score}. The basic report includes score distribution and {evidence_count} evidence comments."
+    def _build_router_plan(question: str) -> dict[str, Any]:
+        """调用 Router Agent 生成当前分析问题的路由计划。"""
+        route_plan = RouterAgent.route_question(question)
+        logger.info(
+            "Router plan generated: analysis_mode={} focus_dimensions={}",
+            route_plan["analysis_mode"],
+            route_plan["focus_dimensions"],
         )
+        return route_plan
+
+    @staticmethod
+    def _build_summary(
+        question: str,
+        product: Product,
+        stats: dict[str, Any],
+        route_plan: dict[str, Any],
+        evidence_json: list[dict[str, Any]],
+    ) -> str:
+        """调用 Synthesizer Agent 生成结构化摘要。"""
+        summary = SynthesizerAgent.build_summary(
+            question=question,
+            product=product,
+            route_plan=route_plan,
+            stats=stats,
+            evidence=evidence_json,
+        )
+        logger.info(
+            "Synthesizer summary generated: product_id={} evidence_count={} summary_preview={}",
+            product.id,
+            len(evidence_json),
+            summary[:120],
+        )
+        return summary
 
     @staticmethod
     def _build_chart_config(stats: dict[str, Any]) -> dict[str, Any]:
+        """根据统计结果构造适合前端直接渲染的图表配置。"""
         score_distribution = stats.get("score_distribution", {}) or {}
         labels = [str(key) for key in sorted(score_distribution.keys())]
         values = [score_distribution[int(key)] if isinstance(next(iter(score_distribution.keys()), None), int) else score_distribution[key] for key in labels]
+        dimension_stats = stats.get("dimension_stats", {}) or {}
+        dimension_labels = list(dimension_stats.keys())
+        avg_score_values = [
+            float((dimension_stats.get(label) or {}).get("avg_score", 0) or 0)
+            for label in dimension_labels
+        ]
+        bad_rate_values = [
+            round(float((dimension_stats.get(label) or {}).get("bad_rate", 0) or 0) * 100, 2)
+            for label in dimension_labels
+        ]
+        comment_count_values = [
+            int((dimension_stats.get(label) or {}).get("comment_count", 0) or 0)
+            for label in dimension_labels
+        ]
         return {
             "score_distribution": {
+                "title": "评分分布",
                 "xAxis": labels,
                 "series": values,
             },
-            "dimension_stats": stats.get("dimension_stats", {}) or {},
+            "dimension_avg_score": {
+                "title": "维度平均分",
+                "xAxis": dimension_labels,
+                "series": avg_score_values,
+            },
+            "dimension_bad_rate": {
+                "title": "维度差评率(%)",
+                "xAxis": dimension_labels,
+                "series": bad_rate_values,
+            },
+            "dimension_comment_count": {
+                "title": "维度评论数",
+                "xAxis": dimension_labels,
+                "series": comment_count_values,
+            },
+            "dimension_stats": dimension_stats,
         }
 
     @staticmethod
-    def _build_evidence(comments: list[Any]) -> list[dict[str, Any]]:
-        evidence_items: list[dict[str, Any]] = []
-        for comment in comments:
-            evidence_items.append(
-                {
-                    "content": comment.content,
-                    "score": comment.score,
-                    "dimension": comment.dimension,
-                    "similarity": None,
-                }
-            )
-        return evidence_items
-
-    @staticmethod
     def _build_result_message_content(task: AnalysisTask, report: AnalysisReport) -> str:
+        """构造写回会话的分析结果消息内容。"""
         product = task.product
         stats = report.statistics_json or {}
         total_count = stats.get("total_count", 0)
@@ -239,6 +283,7 @@ class AnalysisService:
 
     @staticmethod
     def _upsert_result_message(db: Session, task: AnalysisTask, report: AnalysisReport) -> Message | None:
+        """将分析结果消息写回会话，如果已存在则更新。"""
         if task.conversation_id is None:
             logger.warning("Skip result message because conversation_id is missing: task_id={}", task.task_id)
             return None
@@ -275,6 +320,7 @@ class AnalysisService:
 
     @staticmethod
     def _upsert_failure_message(db: Session, task: AnalysisTask, error_message: str) -> Message | None:
+        """将分析失败消息写回会话，如果已存在则更新。"""
         if task.conversation_id is None:
             logger.warning("Skip failure message because conversation_id is missing: task_id={}", task.task_id)
             return None
@@ -321,13 +367,18 @@ class AnalysisService:
         return failure_message
 
     @staticmethod
-    def _upsert_basic_report(db: Session, task: AnalysisTask) -> AnalysisReport:
+    def _upsert_basic_report(
+        db: Session,
+        task: AnalysisTask,
+        route_plan: dict[str, Any],
+        evidence_json: list[dict[str, Any]],
+    ) -> AnalysisReport:
+        """生成并写回基础报告，同时附带路由计划。"""
         product = task.product
-        stats = CrawlerService.get_comment_statistics(db, product.id)
-        comments = CrawlerService.get_product_comments(db, product.id, limit=5)
-        summary = AnalysisService._build_summary(product, stats, len(comments))
+        stats = SQLAgent.aggregate_comments(db, product.id, route_plan)
+        summary = AnalysisService._build_summary(task.question, product, stats, route_plan, evidence_json)
         charts_config = AnalysisService._build_chart_config(stats)
-        evidence_json = AnalysisService._build_evidence(comments)
+        report_stats = {**stats, "router_plan": route_plan}
 
         report = task.report
         if report is None:
@@ -340,16 +391,17 @@ class AnalysisService:
             db.add(report)
 
         report.summary = summary
-        report.statistics_json = stats
+        report.statistics_json = report_stats
         report.charts_config = charts_config
         report.evidence_json = evidence_json
         db.commit()
         db.refresh(report)
         logger.info(
-            "Analysis report saved: task_id={} report_id={} total_comments={}",
+            "Analysis report saved: task_id={} report_id={} total_comments={} analysis_mode={}",
             task.task_id,
             report.id,
             stats.get("total_count", 0),
+            route_plan.get("analysis_mode"),
         )
         AnalysisService._upsert_result_message(db, task, report)
         return report
@@ -405,17 +457,26 @@ class AnalysisService:
                     task.task_id,
                 )
 
+            AnalysisService._set_task_state(db, task, current_step="router_agent", progress=45)
+            route_plan = AnalysisService._build_router_plan(task.question)
             AnalysisService._set_task_state(db, task, current_step="sql_agent", progress=60)
-            stats = CrawlerService.get_comment_statistics(db, product.id)
+            stats = SQLAgent.aggregate_comments(db, product.id, route_plan)
             logger.info(
-                "Statistics prepared for task_id={} total_count={} avg_score={}",
+                "SQL agent prepared statistics for task_id={} total_count={} avg_score={} bad_rate={}",
                 task.task_id,
                 stats.get("total_count"),
                 stats.get("avg_score"),
+                stats.get("bad_rate"),
             )
             AnalysisService._set_task_state(db, task, current_step="rag_agent", progress=80)
+            evidence_json = RAGAgent.retrieve_evidence(
+                db=db,
+                product_id=product.id,
+                question=task.question,
+                route_plan=route_plan,
+            )
             AnalysisService._set_task_state(db, task, current_step="synthesizer", progress=90)
-            AnalysisService._upsert_basic_report(db, task)
+            AnalysisService._upsert_basic_report(db, task, route_plan, evidence_json)
             AnalysisService._set_task_state(
                 db,
                 task,
@@ -495,10 +556,14 @@ class AnalysisService:
 
     @staticmethod
     def _should_crawl(product: Product) -> bool:
+        """判断商品数据是否需要重新抓取，并兼容数据库中的无时区时间。"""
         if product.last_crawled_at is None:
             return True
+        last_crawled_at = product.last_crawled_at
+        if last_crawled_at.tzinfo is None:
+            last_crawled_at = last_crawled_at.replace(tzinfo=timezone.utc)
         now = datetime.now(timezone.utc)
-        return (now - product.last_crawled_at).days > 3
+        return (now - last_crawled_at).days > 3
 
     @staticmethod
     def get_task_by_task_id(db: Session, user_id: int, task_id: str) -> AnalysisTask:

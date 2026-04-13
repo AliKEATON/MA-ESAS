@@ -112,15 +112,13 @@ async def login(req: UserLoginRequest, db: Session = Depends(get_db)):
 
 @router.get("/me", response_model=ApiResponse[UserResponse])
 async def get_current_user_info(
-    authorization: str = None,
-    db: Session = Depends(get_db)
+    current_user: UserResponse = Depends(get_current_user_dependency),
 ):
     """获取当前用户信息"""
     try:
-        user = get_current_user(authorization, db)
         return ApiResponse(
             code=200,
-            data=user,
+            data=current_user,
             message="success"
         )
     except HTTPException:

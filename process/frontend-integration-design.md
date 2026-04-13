@@ -22,12 +22,11 @@
 
 ## Key Files
 - `frontend-streamlit/app.py`
-- `frontend-streamlit/app_runtime.py`
-- `frontend-streamlit/utils/api_client_v2.py`
+- `frontend-streamlit/utils/api_client.py`
 - `backend/app/api/conversations.py`
 - `backend/app/api/analysis.py`
 
 ## Notes
 - Keep frontend state in `st.session_state`.
 - Prefer compatibility fixes over extra abstraction.
-- Land the main flow first, then fill in rename/delete/retry actions.
+- Land the main flow first, then fill in rename, delete, and retry actions.

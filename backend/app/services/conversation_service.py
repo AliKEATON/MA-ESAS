@@ -1,10 +1,9 @@
-"""Conversation service for the unified message entrypoint."""
+"""统一消息入口的会话服务。"""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from loguru import logger
 from sqlalchemy.orm import Session
 
 from app.models import AnalysisTask, Conversation, Message
@@ -24,13 +23,16 @@ from app.schemas.conversation import (
     MessageSendResponse,
 )
 from app.services.analysis_service import AnalysisService
+from app.services.chat_service import ChatService
+from app.utils.logger import logger
 
 
 class ConversationService:
-    """Conversation CRUD plus unified message dispatch."""
+    """封装会话管理与消息分发逻辑。"""
 
     @staticmethod
     def _build_task_summary(task: AnalysisTask | None) -> AnalysisTaskSummaryResponse | None:
+        """把分析任务模型转换为接口层需要的摘要结构。"""
         if task is None:
             return None
         return AnalysisTaskSummaryResponse(
@@ -42,22 +44,8 @@ class ConversationService:
         )
 
     @staticmethod
-    def _build_direct_reply(conversation: Conversation, content: str) -> str:
-        stripped = content.strip()
-        if conversation.bound_product_id:
-            return (
-                "Message received. The conversation is already bound to a product. "
-                "If you want a new product analysis, send a supported product link and a concrete analysis question. "
-                f"Current message: {stripped[:120]}"
-            )
-        return (
-            "Message received. The current direct-reply path is a placeholder response. "
-            "If you want product analysis, send a supported product link and your question. "
-            f"Current message: {stripped[:120]}"
-        )
-
-    @staticmethod
     def create_conversation(db: Session, user_id: int, req: ConversationCreateRequest) -> ConversationResponse:
+        """为当前用户创建一个新会话。"""
         conversation = Conversation(
             user_id=user_id,
             bound_product_id=req.bound_product_id,
@@ -71,6 +59,7 @@ class ConversationService:
 
     @staticmethod
     def delete_conversation(db: Session, user_id: int, conversation_id: int) -> None:
+        """删除当前用户指定的会话。"""
         conversation = db.query(Conversation).filter(
             Conversation.id == conversation_id,
             Conversation.user_id == user_id,
@@ -93,6 +82,7 @@ class ConversationService:
         conversation_id: int,
         req: ConversationUpdateRequest,
     ) -> ConversationResponse:
+        """更新当前用户会话的标题。"""
         conversation = db.query(Conversation).filter(
             Conversation.id == conversation_id,
             Conversation.user_id == user_id,
@@ -119,6 +109,7 @@ class ConversationService:
         page: int = 1,
         page_size: int = 20,
     ) -> ConversationListResponse:
+        """分页获取当前用户的会话列表及任务摘要。"""
         query = db.query(Conversation).filter(Conversation.user_id == user_id)
         total = query.count()
         conversations = query.order_by(Conversation.updated_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
@@ -169,6 +160,7 @@ class ConversationService:
         user_id: int,
         conversation_id: int,
     ) -> ConversationDetailResponse:
+        """获取单个会话的消息明细和关联任务。"""
         conversation = db.query(Conversation).filter(
             Conversation.id == conversation_id,
             Conversation.user_id == user_id,
@@ -217,6 +209,7 @@ class ConversationService:
         user_id: int,
         conversation_id: int,
     ) -> list[ConversationTaskResponse]:
+        """获取指定会话下的分析任务列表。"""
         conversation = db.query(Conversation).filter(
             Conversation.id == conversation_id,
             Conversation.user_id == user_id,
@@ -256,6 +249,7 @@ class ConversationService:
         conversation_id: int,
         req: MessageSendRequest,
     ) -> MessageSendResponse:
+        """发送消息并按内容路由到普通聊天或分析任务流程。"""
         conversation = db.query(Conversation).filter(
             Conversation.id == conversation_id,
             Conversation.user_id == user_id,
@@ -264,6 +258,13 @@ class ConversationService:
             raise ValueError(f"Conversation not found: {conversation_id}")
 
         try:
+            history_messages = list(reversed(
+                db.query(Message)
+                .filter(Message.conversation_id == conversation_id)
+                .order_by(Message.created_at.desc())
+                .limit(ChatService.MAX_HISTORY_MESSAGES)
+                .all()
+            ))
             product = AnalysisService.resolve_product_for_message(db, conversation, req.content)
             message_type = MessageType.ANALYSIS_REQUEST if product else MessageType.CHAT
             logger.info(
@@ -289,11 +290,16 @@ class ConversationService:
             conversation.updated_at = datetime.now(timezone.utc)
 
             if product is None:
+                reply_content = ChatService.generate_reply(
+                    conversation=conversation,
+                    user_content=req.content,
+                    history_messages=history_messages,
+                )
                 reply_message = Message(
                     conversation_id=conversation_id,
                     role=MessageRole.ASSISTANT,
                     message_type=MessageType.CHAT,
-                    content=ConversationService._build_direct_reply(conversation, req.content),
+                    content=reply_content,
                 )
                 db.add(reply_message)
                 db.commit()
@@ -385,6 +391,7 @@ class ConversationService:
         user_id: int,
         conversation_id: int,
     ) -> list[MessageResponse]:
+        """获取指定会话的全部消息记录。"""
         conversation = db.query(Conversation).filter(
             Conversation.id == conversation_id,
             Conversation.user_id == user_id,

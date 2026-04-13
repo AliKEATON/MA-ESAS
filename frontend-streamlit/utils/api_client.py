@@ -1,98 +1,126 @@
-'''
-"""
-前端 API 调用客户端
-封装对 FastAPI 后端的所有 HTTP 请求
-"""
+"""HTTP client for the Streamlit frontend."""
+
+from __future__ import annotations
+
+from typing import Any
 
 import requests
-from frontend.config import FASTAPI_BASE_URL
+
+from config import FASTAPI_BASE_URL
+
+
+class APIClientError(RuntimeError):
+    """Raised when the backend request fails."""
 
 
 class APIClient:
-    """FastAPI 后端客户端"""
+    """Thin wrapper around the FastAPI backend."""
 
-    def __init__(self, token: str = None):
-        self.base_url = FASTAPI_BASE_URL
+    def __init__(self, token: str | None = None):
+        self.base_url = FASTAPI_BASE_URL.rstrip("/")
         self.token = token
-        self.headers = {}
-        if token:
-            self.headers["Authorization"] = f"Bearer {token}"
 
-    def health_check(self) -> dict:
-        """检查后端服务是否正常"""
-        resp = requests.get(f"{self.base_url}/health", timeout=5)
-        resp.raise_for_status()
-        return resp.json()
-'''
+    def _headers(self) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        return headers
 
-from utils.api_client_v2 import APIClient, APIClientError
-'''
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, Any] | None = None,
+        timeout: int = 15,
+        allow_statuses: set[int] | None = None,
+    ) -> dict[str, Any]:
+        allowed = allow_statuses or {200, 201, 202}
+        response = requests.request(
+            method=method,
+            url=f"{self.base_url}{path}",
+            json=json,
+            headers=self._headers(),
+            timeout=timeout,
+        )
 
-    # ========== 认证 ==========
-    def login(self, username: str, password: str) -> dict:
-        """用户登录"""
-        resp = requests.post(
-            f"{self.base_url}/api/auth/login",
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+
+        if response.status_code not in allowed:
+            message = "Request failed"
+            if isinstance(payload, dict):
+                message = payload.get("detail") or payload.get("message") or message
+            raise APIClientError(f"{response.status_code}: {message}")
+
+        if not isinstance(payload, dict):
+            raise APIClientError("Backend returned an invalid JSON payload")
+
+        payload["_http_status"] = response.status_code
+        return payload
+
+    def health_check(self) -> dict[str, Any]:
+        return self._request("GET", "/health", allow_statuses={200})
+
+    def login(self, username: str, password: str) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            "/api/auth/login",
             json={"username": username, "password": password},
-            timeout=10,
         )
-        resp.raise_for_status()
-        return resp.json()
 
-    def register(self, username: str, password: str, email: str) -> dict:
-        """用户注册"""
-        resp = requests.post(
-            f"{self.base_url}/api/auth/register",
-            json={"username": username, "password": password, "email": email},
-            timeout=10,
+    def register(self, username: str, email: str, password: str) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            "/api/auth/register",
+            json={"username": username, "email": email, "password": password},
         )
-        resp.raise_for_status()
-        return resp.json()
 
-    # ========== 对话 ==========
-    def get_conversations(self) -> list:
-        """获取历史对话列表"""
-        resp = requests.get(
-            f"{self.base_url}/api/conversations",
-            headers=self.headers,
-            timeout=10,
-        )
-        resp.raise_for_status()
-        return resp.json()
+    def get_current_user(self) -> dict[str, Any]:
+        return self._request("GET", "/api/auth/me")
 
-    def send_message(self, conversation_id: str, message: str, product_url: str = None) -> dict:
-        """发送消息（普通对话或商品分析）"""
-        payload = {"message": message}
-        if product_url:
-            payload["product_url"] = product_url
-        resp = requests.post(
-            f"{self.base_url}/api/conversations/{conversation_id}/messages",
-            json=payload,
-            headers=self.headers,
-            timeout=300,  # 分析任务可能耗时较长
-        )
-        resp.raise_for_status()
-        return resp.json()
+    def list_conversations(self, page: int = 1, page_size: int = 50) -> dict[str, Any]:
+        return self._request("GET", f"/api/conversations?page={page}&page_size={page_size}")
 
-    # ========== 分析 ==========
-    def start_analysis(self, product_url: str, question: str) -> dict:
-        """启动商品分析"""
-        resp = requests.post(
-            f"{self.base_url}/api/analysis/start",
-            json={"product_url": product_url, "question": question},
-            headers=self.headers,
-            timeout=30,
+    def create_conversation(self, bound_product_id: int | None = None) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            "/api/conversations",
+            json={"bound_product_id": bound_product_id},
         )
-        resp.raise_for_status()
-        return resp.json()
 
-    def get_analysis_status(self, task_id: str) -> dict:
-        """获取分析任务状态"""
-        resp = requests.get(
-            f"{self.base_url}/api/analysis/{task_id}/status",
-            headers=self.headers,
-            timeout=10,
+    def get_conversation_detail(self, conversation_id: int) -> dict[str, Any]:
+        return self._request("GET", f"/api/conversations/{conversation_id}")
+
+    def update_conversation(self, conversation_id: int, title: str) -> dict[str, Any]:
+        return self._request(
+            "PATCH",
+            f"/api/conversations/{conversation_id}",
+            json={"title": title},
         )
-        resp.raise_for_status()
-        return resp.json()
-'''
+
+    def delete_conversation(self, conversation_id: int) -> dict[str, Any]:
+        return self._request("DELETE", f"/api/conversations/{conversation_id}")
+
+    def send_message(self, conversation_id: int, content: str) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/api/conversations/{conversation_id}/messages",
+            json={"content": content},
+            timeout=60,
+        )
+
+    def get_task_progress(self, task_id: str) -> dict[str, Any]:
+        return self._request("GET", f"/api/analysis/tasks/{task_id}")
+
+    def get_task_result(self, task_id: str) -> dict[str, Any]:
+        return self._request(
+            "GET",
+            f"/api/analysis/tasks/{task_id}/result",
+            allow_statuses={200, 202},
+        )
+
+    def retry_task(self, task_id: str) -> dict[str, Any]:
+        return self._request("POST", f"/api/analysis/tasks/{task_id}/retry")

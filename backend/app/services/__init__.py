@@ -5,4 +5,5 @@ Current active modules:
 - analysis_service.py
 - auth_service.py
 - crawler_service.py
+- chat_service.py
 """
