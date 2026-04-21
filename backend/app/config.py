@@ -7,13 +7,25 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# 加载 .env 文件
-load_dotenv()
-
 # ========== 项目路径 ==========
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 LOGS_DIR = BASE_DIR / "logs"
 DATA_DIR = BASE_DIR / "data"
+
+# 优先从项目根目录加载 .env，避免启动目录变化导致配置漂移
+load_dotenv(BASE_DIR / ".env")
+
+
+def _resolve_storage_path(path_value: str, default_path: Path) -> str:
+    """将配置中的存储路径解析为基于项目根目录的绝对路径。"""
+    raw_value = (path_value or "").strip()
+    if not raw_value:
+        return str(default_path)
+
+    candidate = Path(raw_value)
+    if candidate.is_absolute():
+        return str(candidate)
+    return str((BASE_DIR / candidate).resolve())
 
 # 确保目录存在
 LOGS_DIR.mkdir(exist_ok=True)
@@ -47,10 +59,16 @@ SQLALCHEMY_DATABASE_URL = (
 )
 
 # DuckDB
-DUCKDB_PATH = os.getenv("DUCKDB_PATH", str(DATA_DIR / "duckdb" / "analysis.duckdb"))
+DUCKDB_PATH = _resolve_storage_path(
+    os.getenv("DUCKDB_PATH", ""),
+    DATA_DIR / "duckdb" / "analysis.duckdb",
+)
 
 # ChromaDB
-CHROMADB_PATH = os.getenv("CHROMADB_PATH", str(DATA_DIR / "chromadb"))
+CHROMADB_PATH = _resolve_storage_path(
+    os.getenv("CHROMADB_PATH", ""),
+    DATA_DIR / "chromadb",
+)
 
 # ========== AI 模型配置 ==========
 # DeepSeek API
@@ -59,6 +77,8 @@ DEEPSEEK_API_BASE = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com/v1"
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
 # Embedding 模型
+EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", DEEPSEEK_API_KEY)
+EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", DEEPSEEK_API_BASE)
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 
 # ========== 爬虫配置 ==========
@@ -69,6 +89,11 @@ JD_CRAWLER_USER_AGENT = os.getenv(
     "JD_CRAWLER_USER_AGENT",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 )
+JD_CRAWLER_BROWSER_PATH = os.getenv("JD_CRAWLER_BROWSER_PATH", "").strip()
+JD_CRAWLER_USE_SYSTEM_USER_PATH = os.getenv("JD_CRAWLER_USE_SYSTEM_USER_PATH", "False").lower() == "true"
+JD_CRAWLER_USER_DATA_PATH = os.getenv("JD_CRAWLER_USER_DATA_PATH", "").strip()
+JD_CRAWLER_PROFILE = os.getenv("JD_CRAWLER_PROFILE", "Default").strip() or "Default"
+JD_CRAWLER_LOCAL_PORT = int(os.getenv("JD_CRAWLER_LOCAL_PORT", "0") or 0)
 
 # ========== 邮件配置 ==========
 SMTP_SERVER = os.getenv("SMTP_SERVER", "")
@@ -84,7 +109,10 @@ JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", 1440))
 
 # ========== 日志配置 ==========
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-LOG_FILE_PATH = os.getenv("LOG_FILE_PATH", str(LOGS_DIR / "app.log"))
+LOG_FILE_PATH = _resolve_storage_path(
+    os.getenv("LOG_FILE_PATH", ""),
+    LOGS_DIR / "app.log",
+)
 LOG_MAX_SIZE = os.getenv("LOG_MAX_SIZE", "500MB")
 LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", 7))
 SQL_ECHO = os.getenv("SQL_ECHO", "False").lower() == "true"

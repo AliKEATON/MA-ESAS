@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.db.database import SessionLocal
 from app.models import Comment, Product
 from app.models.product import ProductStatus
+from app.services.vector_store_service import VectorStoreService
 from app.utils.logger import logger
 
 
@@ -93,6 +94,7 @@ def get_or_create_demo_product(db: Session) -> Product:
 
 def reset_demo_comments(db: Session, product: Product) -> int:
     """删除当前演示商品下的历史演示评论。"""
+    VectorStoreService.delete_product_comments(product.id)
     deleted_count = (
         db.query(Comment)
         .filter(
@@ -175,6 +177,7 @@ def seed_demo_analysis_data(reset: bool) -> None:
 
         created_count, updated_count = upsert_demo_comments(db, product)
         refresh_product_snapshot(db, product)
+        vectorized_count = VectorStoreService.upsert_product_comments(db, product.id)
         db.commit()
         db.refresh(product)
 
@@ -185,6 +188,7 @@ def seed_demo_analysis_data(reset: bool) -> None:
         print(f"Created comments: {created_count}")
         print(f"Updated comments: {updated_count}")
         print(f"Deleted comments: {deleted_count}")
+        print(f"Vectorized comments: {vectorized_count}")
         print("Suggested prompt: 请分析这款商品的差评，重点看物流和售后问题。")
     except Exception as exc:
         db.rollback()

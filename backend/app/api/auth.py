@@ -4,7 +4,6 @@ FastAPI 认证路由
 
 from fastapi import APIRouter, Depends, HTTPException, status, Header
 from sqlalchemy.orm import Session
-from loguru import logger
 
 from app.db.database import get_db
 from app.schemas.user import (
@@ -12,6 +11,7 @@ from app.schemas.user import (
 )
 from app.schemas.common import ApiResponse
 from app.services.auth_service import AuthService
+from app.utils.logger import logger
 
 router = APIRouter(prefix="/api/auth", tags=["认证"])
 
@@ -64,13 +64,13 @@ async def register(req: UserRegisterRequest, db: Session = Depends(get_db)):
             message="User registered successfully"
         )
     except ValueError as e:
-        logger.warning(f"Registration failed: {str(e)}")
+        logger.warning("用户注册失败：{}", str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
     except Exception as e:
-        logger.error(f"Registration error: {str(e)}")
+        logger.error("用户注册发生异常：{}", str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error"
@@ -103,7 +103,7 @@ async def login(req: UserLoginRequest, db: Session = Depends(get_db)):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Login error: {str(e)}")
+        logger.error("用户登录发生异常：{}", str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error"
@@ -124,7 +124,7 @@ async def get_current_user_info(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Get user info error: {str(e)}")
+        logger.error("获取当前用户信息失败：{}", str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error"

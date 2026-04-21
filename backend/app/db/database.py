@@ -3,6 +3,9 @@
 管理 MySQL、DuckDB、ChromaDB 的连接
 """
 
+import tempfile
+from pathlib import Path
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import QueuePool
@@ -15,6 +18,10 @@ from app.config import (
     CHROMADB_PATH,
     SQL_ECHO,
 )
+
+
+_chromadb_client = None
+_chromadb_client_path = None
 
 # ========== MySQL 连接 ==========
 # 创建 SQLAlchemy 引擎
@@ -62,15 +69,63 @@ def get_duckdb_connection():
 def get_chromadb_client():
     """
     获取 ChromaDB 客户端
-    用于向量检索
+    配置目录不可用时自动切换到 ASCII 安全路径
     """
-    try:
-        client = chromadb.PersistentClient(path=CHROMADB_PATH)
-        logger.debug(f"ChromaDB 连接成功: {CHROMADB_PATH}")
-        return client
-    except Exception as e:
-        logger.error(f"ChromaDB 连接失败: {e}")
-        raise
+    global _chromadb_client, _chromadb_client_path
+
+    if _chromadb_client is not None:
+        return _chromadb_client
+
+    errors: list[str] = []
+    for index, candidate_path in enumerate(_build_chromadb_candidate_paths()):
+        try:
+            path_obj = Path(candidate_path)
+            path_obj.mkdir(parents=True, exist_ok=True)
+            client = chromadb.PersistentClient(path=str(path_obj))
+            _chromadb_client = client
+            _chromadb_client_path = str(path_obj)
+
+            if index == 0:
+                logger.debug("ChromaDB client initialized: path={}", path_obj)
+            else:
+                logger.warning(
+                    "ChromaDB fallback path enabled: configured_path={} active_path={}",
+                    CHROMADB_PATH,
+                    path_obj,
+                )
+            return client
+        except Exception as exc:
+            errors.append(f"{candidate_path}: {exc}")
+            logger.warning(
+                "ChromaDB client initialization failed: path={} error={}",
+                candidate_path,
+                exc,
+            )
+
+    raise RuntimeError("Failed to initialize ChromaDB client. " + " | ".join(errors))
+
+
+def get_chromadb_client_path() -> str | None:
+    """
+    返回当前生效的 ChromaDB 目录
+    便于日志和测试确认
+    """
+    return _chromadb_client_path
+
+
+def _build_chromadb_candidate_paths() -> list[str]:
+    """
+    构造 ChromaDB 候选目录
+    先尝试项目配置目录，再退回系统临时目录
+    """
+    configured_path = Path(CHROMADB_PATH).resolve()
+    safe_path = Path(tempfile.gettempdir()) / "ma_esas_chromadb" / "persistent"
+
+    candidates = [str(configured_path)]
+    safe_path_str = str(safe_path.resolve())
+    if safe_path_str not in candidates:
+        candidates.append(safe_path_str)
+    return candidates
 
 
 # ========== 数据库初始化 ==========

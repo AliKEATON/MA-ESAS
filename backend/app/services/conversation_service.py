@@ -17,13 +17,11 @@ from app.schemas.conversation import (
     ConversationListResponse,
     ConversationResponse,
     ConversationUpdateRequest,
-    MessageHandlingMode,
     MessageResponse,
     MessageSendRequest,
     MessageSendResponse,
 )
 from app.services.analysis_service import AnalysisService
-from app.services.chat_service import ChatService
 from app.utils.logger import logger
 
 
@@ -249,7 +247,7 @@ class ConversationService:
         conversation_id: int,
         req: MessageSendRequest,
     ) -> MessageSendResponse:
-        """发送消息并按内容路由到普通聊天或分析任务流程。"""
+        """统一消息入口：所有消息都落为分析任务并进入新工作流链路。"""
         conversation = db.query(Conversation).filter(
             Conversation.id == conversation_id,
             Conversation.user_id == user_id,
@@ -258,28 +256,11 @@ class ConversationService:
             raise ValueError(f"Conversation not found: {conversation_id}")
 
         try:
-            history_messages = list(reversed(
-                db.query(Message)
-                .filter(Message.conversation_id == conversation_id)
-                .order_by(Message.created_at.desc())
-                .limit(ChatService.MAX_HISTORY_MESSAGES)
-                .all()
-            ))
             product = AnalysisService.resolve_product_for_message(db, conversation, req.content)
-            message_type = MessageType.ANALYSIS_REQUEST if product else MessageType.CHAT
-            logger.info(
-                "Message routing decided: conversation_id={} user_id={} message_type={} bound_product_id={} resolved_product_id={}",
-                conversation_id,
-                user_id,
-                message_type.value,
-                conversation.bound_product_id,
-                product.id if product else None,
-            )
-
             user_message = Message(
                 conversation_id=conversation_id,
                 role=MessageRole.USER,
-                message_type=message_type,
+                message_type=MessageType.ANALYSIS_REQUEST,
                 content=req.content,
             )
             db.add(user_message)
@@ -289,48 +270,18 @@ class ConversationService:
                 conversation.title = req.content[:50]
             conversation.updated_at = datetime.now(timezone.utc)
 
-            if product is None:
-                reply_content = ChatService.generate_reply(
-                    conversation=conversation,
-                    user_content=req.content,
-                    history_messages=history_messages,
-                )
-                reply_message = Message(
+            reusable_task = None
+            if product is not None:
+                reusable_task = AnalysisService.find_reusable_task(
+                    db=db,
+                    user_id=user_id,
                     conversation_id=conversation_id,
-                    role=MessageRole.ASSISTANT,
-                    message_type=MessageType.CHAT,
-                    content=reply_content,
-                )
-                db.add(reply_message)
-                db.commit()
-                db.refresh(user_message)
-                db.refresh(reply_message)
-                logger.info(f"Direct message saved: {user_message.id} in conversation {conversation_id}")
-                logger.info(
-                    "Direct reply generated: conversation_id={} user_message_id={} reply_message_id={}",
-                    conversation_id,
-                    user_message.id,
-                    reply_message.id,
-                )
-                return MessageSendResponse(
-                    handling_mode=MessageHandlingMode.DIRECT_REPLY,
-                    user_message=MessageResponse.model_validate(user_message),
-                    reply_message=MessageResponse.model_validate(reply_message),
+                    product_id=product.id,
+                    question=req.content,
                 )
 
-            reusable_task = AnalysisService.find_reusable_task(
-                db=db,
-                user_id=user_id,
-                conversation_id=conversation_id,
-                product_id=product.id,
-                question=req.content,
-            )
             if reusable_task is not None:
                 task = reusable_task
-                notice_content = (
-                    "Existing analysis task reused. "
-                    f"Use task_id={task.task_id} to query progress and result."
-                )
                 logger.info(
                     "Reusing analysis task instead of creating duplicate: task_id={} conversation_id={} user_message_id={}",
                     task.task_id,
@@ -346,36 +297,22 @@ class ConversationService:
                     product=product,
                     question=req.content,
                 )
-                notice_content = (
-                    "Analysis task created. "
-                    f"Use task_id={task.task_id} to query progress and result."
-                )
-            notice_message = Message(
-                conversation_id=conversation_id,
-                role=MessageRole.SYSTEM,
-                message_type=MessageType.SYSTEM_NOTICE,
-                content=notice_content,
-            )
-            db.add(notice_message)
+
             db.commit()
             db.refresh(user_message)
             db.refresh(task)
-            db.refresh(notice_message)
 
             logger.info(
-                "Task created from message: task_id={} conversation_id={} user_message_id={} notice_message_id={}",
+                "Task created from message: task_id={} conversation_id={} user_message_id={}",
                 task.task_id,
                 conversation_id,
                 user_message.id,
-                notice_message.id,
             )
             return MessageSendResponse(
-                handling_mode=MessageHandlingMode.TASK_CREATED,
                 user_message=MessageResponse.model_validate(user_message),
-                reply_message=MessageResponse.model_validate(notice_message),
                 analysis_task=AnalysisTaskSummaryResponse(
                     task_id=task.task_id,
-                    status=task.status.value,
+                    status=task.status,
                     progress=task.progress,
                     current_step=task.current_step,
                     product_id=task.product_id,

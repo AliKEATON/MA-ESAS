@@ -5,7 +5,7 @@
 
 import re
 from typing import Optional, List
-from loguru import logger
+from app.utils.logger import logger
 
 
 class LinkExtractor:

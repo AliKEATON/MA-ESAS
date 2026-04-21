@@ -36,8 +36,8 @@ class AnalysisTask(Base):
     conversation_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    product_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True
+    product_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("products.id", ondelete="CASCADE"), nullable=True, index=True
     )
     trigger_message_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("messages.id", ondelete="CASCADE"), nullable=False, index=True

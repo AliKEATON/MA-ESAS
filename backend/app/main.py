@@ -5,10 +5,9 @@ FastAPI 应用入口
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from loguru import logger
-
 from app.config import FASTAPI_TITLE, FASTAPI_VERSION, FASTAPI_DESCRIPTION, ENVIRONMENT
 from app.db.database import init_databases
+from app.utils.logger import logger
 
 
 @asynccontextmanager
@@ -35,7 +34,12 @@ app = FastAPI(
 # 跨域配置
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8501"],  # Streamlit 前端地址
+    allow_origins=[
+        "http://localhost:8501",
+        "http://127.0.0.1:8501",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],  # Streamlit / Vue 前端地址
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

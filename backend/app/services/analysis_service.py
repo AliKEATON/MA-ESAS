@@ -2,37 +2,40 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 from typing import Any
-import uuid
 
 from sqlalchemy.orm import Session
 
-from app.agents.rag_agent import RAGAgent
-from app.agents.router_agent import RouterAgent
-from app.agents.sql_agent import SQLAgent
-from app.agents.synthesizer_agent import SynthesizerAgent
+from app.agents.workflow import AnalysisWorkflow
 from app.db.database import SessionLocal
-from app.models import AnalysisReport, AnalysisTask, Conversation, Message, Product
+from app.models import AnalysisReport, AnalysisTask, Comment, Conversation, Message, Product
 from app.models.analysis_task import AnalysisTaskStatus
 from app.models.conversation import MessageRole, MessageType
 from app.models.product import ProductStatus
+from app.schemas.agent_protocol import FinalAnalysisResponse
 from app.services.crawler_service import CrawlerService
+from app.services.vector_store_service import VectorStoreService
 from app.utils.link_extractor import LinkExtractor
 from app.utils.logger import logger
 
 
 class AnalysisService:
-    """Service helpers for product-analysis task creation and querying."""
+    """基于分析任务的商品分析服务，负责任务生命周期与结果查询。"""
 
+    # 这里的步骤列表对齐新的草案工作流节点，用于任务进度展示。
     STEP_FLOW = [
-        ("link_extract", "Link extraction"),
-        ("crawl_check", "Crawl freshness check"),
-        ("crawling", "Crawler collection"),
-        ("router_agent", "Query routing"),
-        ("sql_agent", "SQL aggregation"),
-        ("rag_agent", "Semantic retrieval"),
-        ("synthesizer", "Result synthesis"),
+        ("resolve_product_context", "解析商品上下文"),
+        ("ensure_product_data", "检查商品数据"),
+        ("crawling", "抓取商品评论"),
+        ("router_agent", "路由分析任务"),
+        ("sql_agent", "执行统计分析"),
+        ("visual_agent", "生成可视化图表"),
+        ("rag_agent", "检索评论证据"),
+        ("answer_agent", "汇总候选回答"),
+        ("master_agent", "审查最终结果"),
+        ("finalize", "收敛最终响应"),
     ]
 
     ANALYSIS_KEYWORDS = (
@@ -55,6 +58,15 @@ class AnalysisService:
     )
 
     @staticmethod
+    def _dump_protocol_value(value: Any) -> Any:
+        """把工作流中的协议对象转换为可安全落库的 JSON 结构。"""
+        if value is None:
+            return None
+        if hasattr(value, "model_dump"):
+            return value.model_dump()
+        return value
+
+    @staticmethod
     def _set_task_state(
         db: Session,
         task: AnalysisTask,
@@ -66,6 +78,7 @@ class AnalysisService:
         started: bool = False,
         finished: bool = False,
     ) -> AnalysisTask:
+        """统一更新分析任务状态，并把最新进度持久化到数据库。"""
         if status is not None:
             task.status = status
         if current_step is not None:
@@ -91,11 +104,13 @@ class AnalysisService:
 
     @staticmethod
     def _contains_analysis_intent(text: str) -> bool:
+        """判断一条消息是否包含分析意图，用于复用会话已绑定商品。"""
         lowered = text.lower()
         return any(keyword in lowered for keyword in AnalysisService.ANALYSIS_KEYWORDS)
 
     @staticmethod
     def _get_or_create_product(db: Session, link_info: dict[str, str]) -> Product:
+        """根据链接解析结果获取已有商品，必要时创建新的商品记录。"""
         product = db.query(Product).filter(
             Product.source == link_info["platform"],
             Product.external_product_id == link_info["product_id"],
@@ -118,7 +133,7 @@ class AnalysisService:
 
     @staticmethod
     def resolve_product_for_message(db: Session, conversation: Conversation, content: str) -> Product | None:
-        """Resolve the product to analyze for a message, if any."""
+        """解析当前消息对应的商品对象，优先使用链接，其次回退到会话绑定商品。"""
         link_info = LinkExtractor.extract_from_text(content)
         if link_info:
             return AnalysisService._get_or_create_product(db, link_info)
@@ -136,6 +151,7 @@ class AnalysisService:
         product_id: int,
         question: str,
     ) -> AnalysisTask | None:
+        """查找同会话、同商品、同问题下仍可复用的分析任务。"""
         normalized_question = question.strip()
         task = db.query(AnalysisTask).filter(
             AnalysisTask.user_id == user_id,
@@ -154,25 +170,59 @@ class AnalysisService:
         return task
 
     @staticmethod
+    def _infer_product_resolved_from(task: AnalysisTask) -> str:
+        """根据任务问题与绑定商品，推断本次商品上下文来源。"""
+        if getattr(task, "product_id", None) is None:
+            return "none"
+        question = getattr(task, "question", "") or ""
+        return "message_link" if LinkExtractor.extract_from_text(question) else "bound_product"
+
+    @staticmethod
+    def _ensure_vector_ready(db: Session, product_id: int) -> bool:
+        """检查并补齐商品评论向量索引，返回当前向量是否可用于检索。"""
+        total_comments = db.query(Comment).filter(
+            Comment.product_id == product_id,
+            Comment.content.isnot(None),
+        ).count()
+        if total_comments == 0:
+            return False
+
+        pending_count = db.query(Comment).filter(
+            Comment.product_id == product_id,
+            Comment.content.isnot(None),
+            Comment.is_vectorized.is_(False),
+        ).count()
+        if pending_count > 0:
+            VectorStoreService.ensure_product_vectorized(db, product_id)
+
+        remaining_pending = db.query(Comment).filter(
+            Comment.product_id == product_id,
+            Comment.content.isnot(None),
+            Comment.is_vectorized.is_(False),
+        ).count()
+        return remaining_pending == 0
+
+    @staticmethod
     def create_task_for_message(
         db: Session,
         user_id: int,
         conversation: Conversation,
         user_message: Message,
-        product: Product,
+        product: Product | None,
         question: str,
     ) -> AnalysisTask:
-        """Persist an analysis task for a previously saved user message."""
-        conversation.bound_product_id = product.id
+        """为已落库的用户消息创建统一分析任务，并在有商品时绑定当前商品。"""
+        if product is not None:
+            conversation.bound_product_id = product.id
         task = AnalysisTask(
             task_id=str(uuid.uuid4()),
             user_id=user_id,
             conversation_id=conversation.id,
-            product_id=product.id,
+            product_id=product.id if product is not None else conversation.bound_product_id,
             trigger_message_id=user_message.id,
             question=question,
             status=AnalysisTaskStatus.PENDING,
-            current_step="crawl_check",
+            current_step="resolve_product_context",
             progress=10,
         )
         db.add(task)
@@ -181,104 +231,28 @@ class AnalysisService:
             "Analysis task created: task_id={} conversation_id={} product_id={} trigger_message_id={}",
             task.task_id,
             conversation.id,
-            product.id,
+            task.product_id,
             user_message.id,
         )
         return task
 
     @staticmethod
-    def _build_router_plan(question: str) -> dict[str, Any]:
-        """调用 Router Agent 生成当前分析问题的路由计划。"""
-        route_plan = RouterAgent.route_question(question)
-        logger.info(
-            "Router plan generated: analysis_mode={} focus_dimensions={}",
-            route_plan["analysis_mode"],
-            route_plan["focus_dimensions"],
-        )
-        return route_plan
-
-    @staticmethod
-    def _build_summary(
-        question: str,
-        product: Product,
-        stats: dict[str, Any],
-        route_plan: dict[str, Any],
-        evidence_json: list[dict[str, Any]],
-    ) -> str:
-        """调用 Synthesizer Agent 生成结构化摘要。"""
-        summary = SynthesizerAgent.build_summary(
-            question=question,
-            product=product,
-            route_plan=route_plan,
-            stats=stats,
-            evidence=evidence_json,
-        )
-        logger.info(
-            "Synthesizer summary generated: product_id={} evidence_count={} summary_preview={}",
-            product.id,
-            len(evidence_json),
-            summary[:120],
-        )
-        return summary
-
-    @staticmethod
-    def _build_chart_config(stats: dict[str, Any]) -> dict[str, Any]:
-        """根据统计结果构造适合前端直接渲染的图表配置。"""
-        score_distribution = stats.get("score_distribution", {}) or {}
-        labels = [str(key) for key in sorted(score_distribution.keys())]
-        values = [score_distribution[int(key)] if isinstance(next(iter(score_distribution.keys()), None), int) else score_distribution[key] for key in labels]
-        dimension_stats = stats.get("dimension_stats", {}) or {}
-        dimension_labels = list(dimension_stats.keys())
-        avg_score_values = [
-            float((dimension_stats.get(label) or {}).get("avg_score", 0) or 0)
-            for label in dimension_labels
-        ]
-        bad_rate_values = [
-            round(float((dimension_stats.get(label) or {}).get("bad_rate", 0) or 0) * 100, 2)
-            for label in dimension_labels
-        ]
-        comment_count_values = [
-            int((dimension_stats.get(label) or {}).get("comment_count", 0) or 0)
-            for label in dimension_labels
-        ]
-        return {
-            "score_distribution": {
-                "title": "评分分布",
-                "xAxis": labels,
-                "series": values,
-            },
-            "dimension_avg_score": {
-                "title": "维度平均分",
-                "xAxis": dimension_labels,
-                "series": avg_score_values,
-            },
-            "dimension_bad_rate": {
-                "title": "维度差评率(%)",
-                "xAxis": dimension_labels,
-                "series": bad_rate_values,
-            },
-            "dimension_comment_count": {
-                "title": "维度评论数",
-                "xAxis": dimension_labels,
-                "series": comment_count_values,
-            },
-            "dimension_stats": dimension_stats,
-        }
-
-    @staticmethod
     def _build_result_message_content(task: AnalysisTask, report: AnalysisReport) -> str:
         """构造写回会话的分析结果消息内容。"""
         product = task.product
-        stats = report.statistics_json or {}
-        total_count = stats.get("total_count", 0)
-        avg_score = stats.get("avg_score", 0)
+        final_response = (report.statistics_json or {}).get("final_response") or {}
+        summary_text = report.summary or final_response.get("answer") or "No summary generated."
+        sql_result = (report.statistics_json or {}).get("sql_result") or {}
+        score_summary = sql_result.get("metrics", {}).get("score_summary") or {}
+        total_count = score_summary.get("total_count", 0)
+        avg_score = score_summary.get("avg_score", 0)
         return (
             f"Analysis completed for product {product.external_product_id}.\n"
             f"Task ID: {task.task_id}\n"
             f"Report ID: {report.id}\n"
             f"Total comments: {total_count}\n"
             f"Average score: {avg_score}\n"
-            f"Summary: {report.summary or 'No summary generated.'}"
+            f"Summary: {summary_text}"
         )
 
     @staticmethod
@@ -367,18 +341,37 @@ class AnalysisService:
         return failure_message
 
     @staticmethod
-    def _upsert_basic_report(
+    def _upsert_report_from_workflow(
         db: Session,
         task: AnalysisTask,
-        route_plan: dict[str, Any],
-        evidence_json: list[dict[str, Any]],
+        workflow_state: dict[str, Any],
     ) -> AnalysisReport:
-        """生成并写回基础报告，同时附带路由计划。"""
-        product = task.product
-        stats = SQLAgent.aggregate_comments(db, product.id, route_plan)
-        summary = AnalysisService._build_summary(task.question, product, stats, route_plan, evidence_json)
-        charts_config = AnalysisService._build_chart_config(stats)
-        report_stats = {**stats, "router_plan": route_plan}
+        """把工作流结果写回分析报告，并同步兼容前端查询结构。"""
+        product_context = workflow_state.get("product_context")
+        data_context = workflow_state.get("data_context")
+        final_response = workflow_state.get("final_response")
+        route_decision = workflow_state.get("route_decision")
+        sql_result = workflow_state.get("sql_result")
+        visual_result = workflow_state.get("visual_result")
+        rag_result = workflow_state.get("rag_result")
+        answer_draft = workflow_state.get("answer_draft")
+        master_decision = workflow_state.get("master_decision")
+        retry_count = workflow_state.get("retry_count", 0)
+
+        summary = final_response.answer if isinstance(final_response, FinalAnalysisResponse) else None
+        evidence_json = [item.model_dump() for item in rag_result.evidence] if rag_result is not None else []
+        report_stats = {
+            "product_context": AnalysisService._dump_protocol_value(product_context),
+            "data_context": AnalysisService._dump_protocol_value(data_context),
+            "route_decision": AnalysisService._dump_protocol_value(route_decision),
+            "sql_result": AnalysisService._dump_protocol_value(sql_result),
+            "visual_result": AnalysisService._dump_protocol_value(visual_result),
+            "rag_result": AnalysisService._dump_protocol_value(rag_result),
+            "answer_draft": AnalysisService._dump_protocol_value(answer_draft),
+            "master_decision": AnalysisService._dump_protocol_value(master_decision),
+            "final_response": final_response.model_dump() if isinstance(final_response, FinalAnalysisResponse) else None,
+            "retry_count": retry_count,
+        }
 
         report = task.report
         if report is None:
@@ -392,23 +385,22 @@ class AnalysisService:
 
         report.summary = summary
         report.statistics_json = report_stats
-        report.charts_config = charts_config
+        report.charts_config = None
         report.evidence_json = evidence_json
         db.commit()
         db.refresh(report)
         logger.info(
-            "Analysis report saved: task_id={} report_id={} total_comments={} analysis_mode={}",
+            "Analysis report saved: task_id={} report_id={} used_agents={}",
             task.task_id,
             report.id,
-            stats.get("total_count", 0),
-            route_plan.get("analysis_mode"),
+            (final_response.meta.used_agents if isinstance(final_response, FinalAnalysisResponse) else []),
         )
         AnalysisService._upsert_result_message(db, task, report)
         return report
 
     @staticmethod
     def process_task(task_id: str) -> None:
-        """Run a basic end-to-end task flow in the background."""
+        """在后台执行分析任务，并通过多 Agent 工作流产出最终协议结果。"""
         db = SessionLocal()
         try:
             task = db.query(AnalysisTask).filter(AnalysisTask.task_id == task_id).first()
@@ -429,59 +421,28 @@ class AnalysisService:
                 task.product_id,
                 task.conversation_id,
             )
-            AnalysisService._set_task_state(
-                db,
-                task,
-                status=AnalysisTaskStatus.PROCESSING,
-                current_step="link_extract",
-                progress=5,
-                started=True,
+            workflow_state = AnalysisWorkflow.run(
+                {
+                    "db": db,
+                    "task": task,
+                    "task_id": task.task_id,
+                    "user_id": task.user_id,
+                    "conversation_id": task.conversation_id,
+                    "user_message": task.question,
+                    "error_message": None,
+                    "set_task_state_fn": AnalysisService._set_task_state,
+                    "should_crawl_fn": AnalysisService._should_crawl,
+                    "crawl_product_fn": CrawlerService.crawl_product,
+                    "ensure_vector_ready_fn": AnalysisService._ensure_vector_ready,
+                    "product_resolved_from": AnalysisService._infer_product_resolved_from(task),
+                }
             )
-            AnalysisService._set_task_state(db, task, current_step="crawl_check", progress=15)
-
-            product = task.product
-            should_crawl = AnalysisService._should_crawl(product)
-            logger.info(
-                "Task crawl decision: task_id={} product_id={} should_crawl={} last_crawled_at={}",
-                task.task_id,
-                product.id,
-                should_crawl,
-                product.last_crawled_at,
-            )
-            if should_crawl:
-                AnalysisService._set_task_state(db, task, current_step="crawling", progress=30)
-                CrawlerService.crawl_product(db, product.id)
-            else:
-                logger.info(
-                    "Skip crawling for task_id={} because product data is fresh",
-                    task.task_id,
-                )
-
-            AnalysisService._set_task_state(db, task, current_step="router_agent", progress=45)
-            route_plan = AnalysisService._build_router_plan(task.question)
-            AnalysisService._set_task_state(db, task, current_step="sql_agent", progress=60)
-            stats = SQLAgent.aggregate_comments(db, product.id, route_plan)
-            logger.info(
-                "SQL agent prepared statistics for task_id={} total_count={} avg_score={} bad_rate={}",
-                task.task_id,
-                stats.get("total_count"),
-                stats.get("avg_score"),
-                stats.get("bad_rate"),
-            )
-            AnalysisService._set_task_state(db, task, current_step="rag_agent", progress=80)
-            evidence_json = RAGAgent.retrieve_evidence(
-                db=db,
-                product_id=product.id,
-                question=task.question,
-                route_plan=route_plan,
-            )
-            AnalysisService._set_task_state(db, task, current_step="synthesizer", progress=90)
-            AnalysisService._upsert_basic_report(db, task, route_plan, evidence_json)
+            AnalysisService._upsert_report_from_workflow(db, task, workflow_state)
             AnalysisService._set_task_state(
                 db,
                 task,
                 status=AnalysisTaskStatus.COMPLETED,
-                current_step="synthesizer",
+                current_step="finalize",
                 progress=100,
                 finished=True,
             )
@@ -495,7 +456,7 @@ class AnalysisService:
                         db,
                         task,
                         status=AnalysisTaskStatus.FAILED,
-                        current_step=task.current_step or "crawl_check",
+                        current_step=task.current_step or "ensure_product_data",
                         progress=task.progress,
                         error_message=str(exc),
                         finished=True,
@@ -507,56 +468,9 @@ class AnalysisService:
             db.close()
 
     @staticmethod
-    def start_analysis(
-        db: Session,
-        user_id: int,
-        conversation_id: int,
-        question: str,
-        product_url: str | None = None,
-    ) -> dict[str, Any]:
-        """Compatibility entrypoint that now persists an analysis task."""
-        conversation = db.query(Conversation).filter(
-            Conversation.id == conversation_id,
-            Conversation.user_id == user_id,
-        ).first()
-        if not conversation:
-            raise ValueError(f"Conversation not found: {conversation_id}")
-
-        content = question if not product_url else f"{question}\n{product_url}"
-        product = AnalysisService.resolve_product_for_message(db, conversation, content)
-        if product is None:
-            raise ValueError("No supported product link found in message content")
-
-        user_message = Message(
-            conversation_id=conversation_id,
-            role=MessageRole.USER,
-            message_type=MessageType.ANALYSIS_REQUEST,
-            content=question,
-        )
-        db.add(user_message)
-        db.flush()
-
-        task = AnalysisService.create_task_for_message(
-            db=db,
-            user_id=user_id,
-            conversation=conversation,
-            user_message=user_message,
-            product=product,
-            question=question,
-        )
-        db.commit()
-        db.refresh(task)
-        return {
-            "task_id": task.task_id,
-            "status": task.status.value,
-            "progress": task.progress,
-            "current_step": task.current_step,
-            "product_id": task.product_id,
-        }
-
-    @staticmethod
     def _should_crawl(product: Product) -> bool:
         """判断商品数据是否需要重新抓取，并兼容数据库中的无时区时间。"""
+        # 超过 3 天未抓取则视为数据过期，需要重新触发采集。
         if product.last_crawled_at is None:
             return True
         last_crawled_at = product.last_crawled_at
@@ -567,6 +481,7 @@ class AnalysisService:
 
     @staticmethod
     def get_task_by_task_id(db: Session, user_id: int, task_id: str) -> AnalysisTask:
+        """按任务 ID 获取任务，并校验该任务属于当前用户。"""
         task = db.query(AnalysisTask).filter(
             AnalysisTask.task_id == task_id,
             AnalysisTask.user_id == user_id,
@@ -577,12 +492,13 @@ class AnalysisService:
 
     @staticmethod
     def retry_task(db: Session, user_id: int, task_id: str) -> AnalysisTask:
+        """把失败任务重置为待执行状态，供上层重新调度。"""
         task = AnalysisService.get_task_by_task_id(db, user_id, task_id)
         if task.status != AnalysisTaskStatus.FAILED:
             raise ValueError(f"Only failed tasks can be retried: {task_id}")
 
         task.status = AnalysisTaskStatus.PENDING
-        task.current_step = "crawl_check"
+        task.current_step = "resolve_product_context"
         task.progress = 0
         task.error_message = None
         task.started_at = None
@@ -599,6 +515,7 @@ class AnalysisService:
 
     @staticmethod
     def get_task_progress(db: Session, user_id: int, task_id: str) -> dict[str, Any]:
+        """返回任务当前进度，并把数据库状态映射为前端可展示的步骤列表。"""
         task = AnalysisService.get_task_by_task_id(db, user_id, task_id)
         current_index = next(
             (index for index, (step, _) in enumerate(AnalysisService.STEP_FLOW) if step == task.current_step),
@@ -634,6 +551,7 @@ class AnalysisService:
 
     @staticmethod
     def get_task_result(db: Session, user_id: int, task_id: str) -> dict[str, Any]:
+        """返回任务最终结果；若结果尚未就绪，则返回当前任务状态。"""
         task = AnalysisService.get_task_by_task_id(db, user_id, task_id)
         if task.status != AnalysisTaskStatus.COMPLETED or task.report is None:
             return {
@@ -647,6 +565,17 @@ class AnalysisService:
 
         report = task.report
         product = task.product
+        statistics = report.statistics_json or {}
+        product_context = statistics.get("product_context")
+        data_context = statistics.get("data_context")
+        final_response = statistics.get("final_response") or {}
+        route_decision = statistics.get("route_decision")
+        sql_result = statistics.get("sql_result")
+        visual_result = statistics.get("visual_result")
+        rag_result = statistics.get("rag_result")
+        answer_draft = statistics.get("answer_draft")
+        master_decision = statistics.get("master_decision")
+        retry_count = statistics.get("retry_count", 0)
         evidence_items: list[dict[str, Any]] = []
         if isinstance(report.evidence_json, list):
             for item in report.evidence_json:
@@ -664,16 +593,26 @@ class AnalysisService:
             "report_id": report.id,
             "task_id": task.task_id,
             "conversation_id": report.conversation_id,
-            "product": {
-                "product_id": product.id,
-                "source": product.source,
-                "external_product_id": product.external_product_id,
-                "product_name": product.product_name,
-            },
-            "summary": report.summary,
-            "statistics": report.statistics_json,
+            "product": (
+                {
+                    "product_id": product.id,
+                    "source": product.source,
+                    "external_product_id": product.external_product_id,
+                    "product_name": product.product_name,
+                }
+                if product is not None else None
+            ),
+            "product_context": product_context,
+            "data_context": data_context,
+            "final_response": final_response,
+            "route_decision": route_decision,
+            "sql_result": sql_result,
+            "visual_result": visual_result,
+            "rag_result": rag_result,
+            "answer_draft": answer_draft,
+            "master_decision": master_decision,
+            "retry_count": retry_count,
             "evidence": evidence_items,
-            "charts_config": report.charts_config,
             "created_at": report.created_at,
             "result_ready": True,
         }

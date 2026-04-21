@@ -5,14 +5,14 @@
 
 from datetime import datetime, timezone
 
-from loguru import logger
 from sqlalchemy.orm import Session
 
-from app.crawlers import JDCrawlerSimple
+from app.crawlers import JDCrawler
 from app.models import Comment, Product
 from app.models.product import ProductStatus
 from app.schemas.product import ProductStatusResponse
-from app.utils.link_extractor import LinkExtractor
+from app.services.vector_store_service import VectorStoreService
+from app.utils.logger import logger
 
 
 class CrawlerService:
@@ -21,7 +21,8 @@ class CrawlerService:
     @staticmethod
     def _get_supported_crawler(platform: str):
         if platform == "jd":
-            return JDCrawlerSimple()
+            # 主程序联调阶段先使用可视浏览器，避免无头模式下页面重渲染导致评论入口失效。
+            return JDCrawler(headless=False)
         raise ValueError(f"暂不支持的平台: {platform}")
 
     @staticmethod
@@ -33,48 +34,7 @@ class CrawlerService:
         return ProductStatusResponse.model_validate(product)
 
     @staticmethod
-    def resolve_product_by_url(db: Session, product_url: str) -> Product:
-        """根据商品链接获取或创建商品记录"""
-        link_info = LinkExtractor.extract_from_text(product_url)
-        if not link_info:
-            raise ValueError("商品链接格式不支持或无法识别商品 ID")
-
-        crawler = CrawlerService._get_supported_crawler(link_info["platform"])
-        product_info = crawler.fetch_product_info(link_info["url"])
-
-        product = db.query(Product).filter(
-            Product.source == product_info["source"],
-            Product.external_product_id == product_info["external_product_id"],
-        ).first()
-
-        if product is None:
-            product = Product(
-                source=product_info["source"],
-                external_product_id=product_info["external_product_id"],
-                product_url=product_info["product_url"],
-                product_name=product_info.get("product_name"),
-                crawl_status=ProductStatus.PENDING,
-            )
-            db.add(product)
-            db.commit()
-            db.refresh(product)
-            logger.info(
-                "Created product for crawler: id={} source={} external_product_id={}",
-                product.id,
-                product.source,
-                product.external_product_id,
-            )
-            return product
-
-        product.product_url = product_info["product_url"]
-        if product_info.get("product_name") and not product.product_name:
-            product.product_name = product_info["product_name"]
-        db.commit()
-        db.refresh(product)
-        return product
-
-    @staticmethod
-    def crawl_product(db: Session, product_id: int, max_pages: int = 5) -> ProductStatusResponse:
+    def crawl_product(db: Session, product_id: int, max_scroll_rounds: int = 5) -> ProductStatusResponse:
         """按商品 ID 爬取商品评论"""
         product = db.query(Product).filter(Product.id == product_id).first()
         if not product:
@@ -83,20 +43,29 @@ class CrawlerService:
         crawler = CrawlerService._get_supported_crawler(product.source)
 
         try:
+            # 先标准化商品基础信息，确保后续抓取使用的是平台标准链接。
             product_info = crawler.fetch_product_info(product.product_url)
             product.product_url = product_info["product_url"]
             if product_info.get("product_name"):
                 product.product_name = product_info["product_name"]
 
+            # 抓取开始前先把商品状态切到 CRAWLING，便于任务进度和失败原因可观测。
             product.crawl_status = ProductStatus.CRAWLING
             product.last_crawl_error = None
             db.commit()
-            logger.info("Product {} status updated to CRAWLING", product_id)
+            logger.info("商品 {} 状态更新为 CRAWLING", product_id)
 
-            logger.info("Starting to crawl product: {}", product.product_url)
-            comments_data = crawler.crawl(product.product_url, max_pages=max_pages)
+            # 实际分页抓评论的逻辑在具体 crawler/base_crawler.crawl() 中完成，
+            # 这里负责按商品 URL 触发抓取并接收清洗后的评论结果。
+            logger.info(
+                "正在爬取商品: {} (max_scroll_rounds={})",
+                product.product_url,
+                max_scroll_rounds,
+            )
+            comments_data = crawler.crawl(product.product_url, max_pages=max_scroll_rounds)
 
             if not comments_data:
+                # 没抓到新评论不算失败，直接刷新评论总数和最后抓取时间。
                 product.crawl_status = ProductStatus.COMPLETED
                 product.comment_count = db.query(Comment).filter(Comment.product_id == product_id).count()
                 product.last_crawled_at = datetime.now(timezone.utc)
@@ -106,6 +75,7 @@ class CrawlerService:
 
             saved_count = 0
             for comment_data in comments_data:
+                # 以 source_comment_id 去重，避免同一商品重复抓取时反复写入相同评论。
                 existing = db.query(Comment).filter(
                     Comment.product_id == product_id,
                     Comment.source_comment_id == comment_data.get("source_comment_id"),
@@ -129,6 +99,10 @@ class CrawlerService:
 
             db.commit()
 
+            # 评论落库后立即补写向量索引，保证后续 RAG 检索可以直接复用最新评论。
+            vectorized_count = VectorStoreService.upsert_product_comments(db, product_id)
+
+            # 抓取成功后统一回写商品状态、评论总量和最近抓取时间。
             product.crawl_status = ProductStatus.COMPLETED
             product.comment_count = db.query(Comment).filter(Comment.product_id == product_id).count()
             product.last_crawled_at = datetime.now(timezone.utc)
@@ -141,20 +115,22 @@ class CrawlerService:
                 saved_count,
                 product.comment_count,
             )
+            logger.info(
+                "Product comments vectorized after crawling: product_id={} vectorized_count={}",
+                product_id,
+                vectorized_count,
+            )
             return ProductStatusResponse.model_validate(product)
 
         except Exception as e:
             logger.error(f"Crawl product error: {str(e)}")
+            # 服务层只要任一步失败，就把商品状态标记为 FAILED，并保留最近错误信息。
             product.crawl_status = ProductStatus.FAILED
             product.last_crawl_error = str(e)
             db.commit()
             raise
-
-    @staticmethod
-    def crawl_product_by_url(db: Session, product_url: str, max_pages: int = 5) -> ProductStatusResponse:
-        """按商品链接解析、建档并执行爬取"""
-        product = CrawlerService.resolve_product_by_url(db, product_url)
-        return CrawlerService.crawl_product(db, product.id, max_pages=max_pages)
+        finally:
+            crawler.close()
 
     @staticmethod
     def get_product_comments(db: Session, product_id: int, limit: int = 100) -> list:

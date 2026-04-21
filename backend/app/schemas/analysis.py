@@ -64,9 +64,17 @@ class AnalysisResultResponse(BaseModel):
     report_id: int
     task_id: str
     conversation_id: int | None
-    product: AnalysisProductResponse
-    summary: str | None
-    statistics: dict[str, Any] | None
+    product: AnalysisProductResponse | None
+    product_context: dict[str, Any] | None = None
+    data_context: dict[str, Any] | None = None
+    final_response: dict[str, Any]
+    route_decision: dict[str, Any] | None
+    sql_result: dict[str, Any] | None
+    visual_result: dict[str, Any] | None = None
+    rag_result: dict[str, Any] | None = None
+    answer_draft: dict[str, Any] | None = None
+    master_decision: dict[str, Any] | None = None
+    retry_count: int = 0
     evidence: list[AnalysisEvidenceItem]
-    charts_config: dict[str, Any] | None
     created_at: datetime
+    result_ready: bool = True

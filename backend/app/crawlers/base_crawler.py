@@ -76,14 +76,15 @@ class BaseCrawler(ABC):
 
             comments = []
 
-            for page in range(1, max_pages + 1):
-                logger.info(f"Fetching page {page}...")
+            # max_pages 参数名为兼容旧接口保留，但在动态评论爬虫里实际表示抓取/滚动轮次。
+            for round_index in range(1, max_pages + 1):
+                logger.info(f"Fetching comment round {round_index}...")
 
                 try:
-                    page_comments = self.fetch_comments(product_id, page)
+                    page_comments = self.fetch_comments(product_id, round_index)
 
                     if not page_comments:
-                        logger.info(f"No more comments at page {page}")
+                        logger.info(f"No more comments at round {round_index}")
                         break
 
                     for comment_data in page_comments:
@@ -95,10 +96,10 @@ class BaseCrawler(ABC):
                             logger.warning(f"Failed to parse comment: {str(e)}")
                             continue
 
-                    logger.info(f"Page {page} fetched: {len(page_comments)} comments")
+                    logger.info(f"Round {round_index} fetched: {len(page_comments)} comments")
 
                 except Exception as e:
-                    logger.error(f"Failed to fetch page {page}: {str(e)}")
+                    logger.error(f"Failed to fetch round {round_index}: {str(e)}")
                     continue
 
             logger.info(f"Crawling completed: {len(comments)} comments fetched")

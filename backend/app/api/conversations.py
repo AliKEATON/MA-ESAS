@@ -2,11 +2,12 @@
 FastAPI 对话路由
 """
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
-from loguru import logger
 
+from app.api.auth import get_current_user_dependency
 from app.db.database import get_db
+from app.schemas.common import ApiResponse
 from app.schemas.conversation import (
     ConversationTaskResponse,
     ConversationCreateRequest,
@@ -14,16 +15,14 @@ from app.schemas.conversation import (
     ConversationListResponse,
     ConversationResponse,
     ConversationUpdateRequest,
-    MessageHandlingMode,
     MessageResponse,
     MessageSendRequest,
     MessageSendResponse,
 )
-from app.schemas.common import ApiResponse
-from app.services.conversation_service import ConversationService
-from app.services.analysis_service import AnalysisService
-from app.api.auth import get_current_user_dependency
 from app.schemas.user import UserResponse
+from app.services.analysis_service import AnalysisService
+from app.services.conversation_service import ConversationService
+from app.utils.logger import logger
 
 router = APIRouter(prefix="/api/conversations", tags=["对话"])
 
@@ -43,7 +42,7 @@ async def create_conversation(
             message="Conversation created successfully"
         )
     except Exception as e:
-        logger.error(f"Create conversation error: {str(e)}")
+        logger.error("创建会话失败：{}", str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error"
@@ -66,7 +65,7 @@ async def get_conversation_list(
             message="success"
         )
     except Exception as e:
-        logger.error(f"Get conversation list error: {str(e)}")
+        logger.error("获取会话列表失败：{}", str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error"
@@ -88,52 +87,49 @@ async def get_conversation_detail(
             message="success"
         )
     except ValueError as e:
-        logger.warning(f"Conversation not found: {str(e)}")
+        logger.warning("会话不存在：{}", str(e))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(e)
         )
     except Exception as e:
-        logger.error(f"Get conversation detail error: {str(e)}")
+        logger.error("获取会话详情失败：{}", str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error"
         )
 
 
-@router.post("/{conversation_id}/messages", response_model=ApiResponse[MessageSendResponse], status_code=201)
+@router.post("/{conversation_id}/messages", response_model=ApiResponse[MessageSendResponse], status_code=202)
 async def send_message(
     conversation_id: int,
     req: MessageSendRequest,
     background_tasks: BackgroundTasks,
-    response: Response,
     current_user: UserResponse = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
-    """发送消息"""
+    """发送消息并统一创建分析任务。"""
     try:
         result = ConversationService.send_message(db, current_user.id, conversation_id, req)
-        response.status_code = 202 if result.handling_mode == MessageHandlingMode.TASK_CREATED else 201
-        if result.analysis_task is not None:
-            logger.info(
-                "Scheduling background analysis: conversation_id={} task_id={}",
-                conversation_id,
-                result.analysis_task.task_id,
-            )
-            background_tasks.add_task(AnalysisService.process_task, result.analysis_task.task_id)
+        logger.info(
+            "准备调度后台分析任务：conversation_id={} task_id={}",
+            conversation_id,
+            result.analysis_task.task_id,
+        )
+        background_tasks.add_task(AnalysisService.process_task, result.analysis_task.task_id)
         return ApiResponse(
-            code=response.status_code,
+            code=202,
             data=result,
-            message="Analysis task created" if result.handling_mode == MessageHandlingMode.TASK_CREATED else "Message sent successfully"
+            message="Analysis task created"
         )
     except ValueError as e:
-        logger.warning(f"Invalid conversation: {str(e)}")
+        logger.warning("会话无效：{}", str(e))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(e)
         )
     except Exception as e:
-        logger.error(f"Send message error: {str(e)}")
+        logger.error("发送消息失败：{}", str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error"
@@ -155,13 +151,13 @@ async def get_messages(
             message="success"
         )
     except ValueError as e:
-        logger.warning(f"Get messages rejected: {str(e)}")
+        logger.warning("获取消息被拒绝：{}", str(e))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(e)
         )
     except Exception as e:
-        logger.error(f"Get messages error: {str(e)}")
+        logger.error("获取消息失败：{}", str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error"
@@ -183,13 +179,13 @@ async def delete_conversation(
             message="Conversation deleted successfully"
         )
     except ValueError as e:
-        logger.warning(f"Delete conversation rejected: {str(e)}")
+        logger.warning("删除会话被拒绝：{}", str(e))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(e)
         )
     except Exception as e:
-        logger.error(f"Delete conversation error: {str(e)}")
+        logger.error("删除会话失败：{}", str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error"
@@ -212,13 +208,13 @@ async def update_conversation(
             message="Conversation updated successfully"
         )
     except ValueError as e:
-        logger.warning(f"Update conversation rejected: {str(e)}")
+        logger.warning("更新会话被拒绝：{}", str(e))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(e)
         )
     except Exception as e:
-        logger.error(f"Update conversation error: {str(e)}")
+        logger.error("更新会话失败：{}", str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error"
@@ -240,13 +236,13 @@ async def get_conversation_tasks(
             message="success"
         )
     except ValueError as e:
-        logger.warning(f"Conversation task list error: {str(e)}")
+        logger.warning("获取会话任务列表失败：{}", str(e))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(e)
         )
     except Exception as e:
-        logger.error(f"Get conversation tasks error: {str(e)}")
+        logger.error("获取会话任务列表异常：{}", str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error"

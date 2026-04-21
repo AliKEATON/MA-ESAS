@@ -21,11 +21,6 @@ class MessageType(str, Enum):
     SYSTEM_NOTICE = "system_notice"
 
 
-class MessageHandlingMode(str, Enum):
-    DIRECT_REPLY = "direct_reply"
-    TASK_CREATED = "task_created"
-
-
 class ConversationCreateRequest(BaseModel):
     bound_product_id: int | None = Field(default=None, description="Bound product id")
 
@@ -75,7 +70,7 @@ class AnalysisTaskSummaryResponse(BaseModel):
     status: AnalysisTaskStatus
     progress: int
     current_step: str | None
-    product_id: int
+    product_id: int | None
 
 
 class ConversationTaskResponse(BaseModel):
@@ -83,7 +78,7 @@ class ConversationTaskResponse(BaseModel):
     status: AnalysisTaskStatus
     progress: int
     current_step: str | None
-    product_id: int
+    product_id: int | None
     question: str
     report_ready: bool
     created_at: datetime
@@ -91,10 +86,8 @@ class ConversationTaskResponse(BaseModel):
 
 
 class MessageSendResponse(BaseModel):
-    handling_mode: MessageHandlingMode
     user_message: MessageResponse
-    reply_message: MessageResponse | None = None
-    analysis_task: AnalysisTaskSummaryResponse | None = None
+    analysis_task: AnalysisTaskSummaryResponse
 
 
 class ConversationResponse(BaseModel):
