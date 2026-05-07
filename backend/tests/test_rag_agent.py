@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import func
 
 from app.agents.llm import LLMUnavailableError
+from app.agents.state import AnalysisWorkflowRuntime
 from app.agents.rag_agent import RAGAgent
 from app.agents.workflow import AnalysisWorkflow
 from app.config import DEEPSEEK_API_KEY
@@ -174,15 +175,26 @@ def test_workflow_rag_agent_passes_route_reason_response_style_and_sql_descripti
 
     route_decision = _build_route_decision()
     sql_result = SQLAgentResult(tool_calls=[], metrics={}, description="差评主要集中在物流。")
-    result = AnalysisWorkflow._rag_agent(
-        {
-            "db": object(),
-            "user_message": "请分析差评原因",
-            "product_context": SimpleNamespace(product_id=88),
-            "route_decision": route_decision,
-            "sql_result": sql_result,
-        }
+    runtime = AnalysisWorkflowRuntime(
+        db=object(),
+        task=SimpleNamespace(question="请分析差评原因", product_id=88, product=None),
+        set_task_state_fn=lambda *_args, **_kwargs: None,
+        should_crawl_fn=lambda _product: False,
+        crawl_product_fn=lambda *_args, **_kwargs: None,
+        product_resolved_from="bound_product",
     )
+    token = AnalysisWorkflow._runtime_context.set(runtime)
+    try:
+        result = AnalysisWorkflow._rag_agent(
+            {
+                "user_message": "请分析差评原因",
+                "product_context": SimpleNamespace(product_id=88),
+                "route_decision": route_decision,
+                "sql_result": sql_result,
+            }
+        )
+    finally:
+        AnalysisWorkflow._runtime_context.reset(token)
 
     assert captured_kwargs["question"] == "请分析差评原因"
     assert captured_kwargs["route_reason"] == route_decision.reason

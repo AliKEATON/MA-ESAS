@@ -22,6 +22,7 @@ const html = computed(() => renderMarkdown(props.message.content))
 <style scoped>
 .assistant-message {
   max-width: min(100%, 52rem);
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
@@ -29,6 +30,10 @@ const html = computed(() => renderMarkdown(props.message.content))
 
 .assistant-message__body {
   color: #162131;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .assistant-message__time {

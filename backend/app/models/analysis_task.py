@@ -51,6 +51,7 @@ class AnalysisTask(Base):
     )
     current_step: Mapped[str | None] = mapped_column(String(50), nullable=True)
     progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # 任务失败时写入持久化错误信息，供进度接口和结果接口返回给前端。
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

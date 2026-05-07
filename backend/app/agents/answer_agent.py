@@ -105,7 +105,7 @@ answer_points 要求：
             visual_result=visual_result,
         )
         if not points:
-            points = [f"针对“{question}”，当前缺少足够的分析结果，建议补充商品上下文后重试。"]
+            points = [f"针对“{question}”，当前未产出足够的分析结果，建议稍后重试或补充更明确的问题信息。"]
         answer = AnswerAgent._compose_answer_text(
             question=question,
             response_style=route_decision.response_style.value,

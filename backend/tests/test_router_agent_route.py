@@ -20,7 +20,6 @@ def test_route_with_mocked_llm(monkeypatch, capsys):
             need_sql=True,
             need_rag=True,
             need_visual=True,
-            analysis_targets=["bad_review_rate", "bad_review_distribution"],
             response_style=ResponseStyle.PROFESSIONAL_ANALYSIS,
             reason="测试桩：需要统计、语义分析与可视化。",
         )
@@ -35,7 +34,7 @@ def test_route_with_mocked_llm(monkeypatch, capsys):
     assert result.need_sql is True
     assert result.need_rag is True
     assert result.need_visual is True
-    assert result.analysis_targets == ["bad_review_rate", "bad_review_distribution"]
+    assert result.response_style == ResponseStyle.PROFESSIONAL_ANALYSIS
 
 
 def test_route_without_product_uses_fallback_result(capsys):
@@ -47,7 +46,6 @@ def test_route_without_product_uses_fallback_result(capsys):
     assert result.need_sql is False
     assert result.need_rag is False
     assert result.need_visual is False
-    assert result.analysis_targets == []
     assert result.response_style == ResponseStyle.BRIEF_ANSWER
 
 
@@ -63,5 +61,4 @@ def test_route_with_real_llm():
     assert isinstance(result.need_sql, bool)
     assert isinstance(result.need_rag, bool)
     assert isinstance(result.need_visual, bool)
-    assert isinstance(result.analysis_targets, list)
     assert isinstance(result.reason, str)

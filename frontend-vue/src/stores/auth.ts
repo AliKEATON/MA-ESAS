@@ -9,6 +9,7 @@ export const useAuthStore = defineStore('auth', () => {
   const token = ref<string | null>(localStorage.getItem(TOKEN_STORAGE_KEY))
   const currentUser = ref<UserResponse | null>(null)
   const loading = ref(false)
+  const changingPassword = ref(false)
   const initialized = ref(false)
 
   /** 判断当前是否已登录。 */
@@ -73,10 +74,21 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
+  /** 调用修改密码接口并返回执行结果。 */
+  async function changePassword(currentPassword: string, newPassword: string) {
+    changingPassword.value = true
+    try {
+      return await authApi.changePassword(currentPassword, newPassword)
+    } finally {
+      changingPassword.value = false
+    }
+  }
+
   return {
     token,
     currentUser,
     loading,
+    changingPassword,
     initialized,
     isAuthenticated,
     setAuthState,
@@ -84,5 +96,6 @@ export const useAuthStore = defineStore('auth', () => {
     hydrateAuthState,
     login,
     register,
+    changePassword,
   }
 })

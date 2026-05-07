@@ -42,6 +42,9 @@ const emit = defineEmits<{
 .chat-message-list {
   display: grid;
   gap: 1.5rem;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
 }
 
 .chat-message-list > * {
@@ -51,6 +54,8 @@ const emit = defineEmits<{
 .chat-message-list__assistant-block {
   display: grid;
   gap: 0.8rem;
+  min-width: 0;
+  max-width: 100%;
 }
 
 @keyframes message-rise {

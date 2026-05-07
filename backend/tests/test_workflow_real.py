@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import func
 
+from app.agents.state import AnalysisWorkflowRuntime
 from app.agents.workflow import AnalysisWorkflow
 from app.config import DEEPSEEK_API_KEY
 from app.db.database import SessionLocal
@@ -42,18 +43,22 @@ def test_analysis_workflow_with_real_llm_and_db():
             product_id=product.id,
             product=product,
         )
+        runtime = AnalysisWorkflowRuntime(
+            db=db,
+            task=task,
+            set_task_state_fn=lambda *_args, **_kwargs: None,
+            should_crawl_fn=lambda _product: False,
+            crawl_product_fn=lambda *_args, **_kwargs: None,
+            product_resolved_from="bound_product",
+        )
 
         workflow_state = AnalysisWorkflow.run(
             {
-                "db": db,
-                "task": task,
                 "user_message": question,
                 "retry_count": 0,
                 "max_retry": 1,
-                "set_task_state_fn": lambda *_args, **_kwargs: None,
-                "should_crawl_fn": lambda _product: False,
-                "crawl_product_fn": lambda *_args, **_kwargs: None,
-            }
+            },
+            runtime=runtime,
         )
         print("real_workflow_context:", flush=True)
         print(
@@ -73,7 +78,6 @@ def test_analysis_workflow_with_real_llm_and_db():
             "rag_result",
             "answer_draft",
             "master_decision",
-            "final_response",
         ):
             value = workflow_state.get(key)
             if value is None:
@@ -88,7 +92,6 @@ def test_analysis_workflow_with_real_llm_and_db():
     rag_result = workflow_state.get("rag_result")
     answer_draft = workflow_state.get("answer_draft")
     master_decision = workflow_state.get("master_decision")
-    final_response = workflow_state.get("final_response")
 
     assert route_decision is not None
     assert route_decision.need_sql is True
@@ -101,5 +104,3 @@ def test_analysis_workflow_with_real_llm_and_db():
     assert answer_draft.answer.strip()
     assert master_decision is not None
     assert master_decision.reason.strip()
-    assert final_response is not None
-    assert final_response.answer.strip()

@@ -7,7 +7,12 @@ from typing import Any
 import requests
 from sqlalchemy.orm import Session
 
-from app.config import EMBEDDING_API_KEY, EMBEDDING_BASE_URL, EMBEDDING_MODEL
+from app.config import (
+    EMBEDDING_API_KEY,
+    EMBEDDING_BASE_URL,
+    EMBEDDING_BATCH_SIZE,
+    EMBEDDING_MODEL,
+)
 from app.db.database import get_chromadb_client
 from app.models import Comment, Product
 from app.utils.logger import logger
@@ -17,6 +22,13 @@ class VectorStoreService:
     """负责评论向量写入、补索引和语义检索。"""
 
     COLLECTION_NAME = "product_comments"
+
+    @staticmethod
+    def _chunk_items(items: list[Any], chunk_size: int) -> list[list[Any]]:
+        """按固定批次切分列表，避免单次 embedding 请求过大。"""
+        if chunk_size <= 0:
+            return [items]
+        return [items[index:index + chunk_size] for index in range(0, len(items), chunk_size)]
 
     @classmethod
     def _embed_texts(cls, texts: list[str]) -> list[list[float]]:
@@ -116,25 +128,46 @@ class VectorStoreService:
 
         try:
             collection = cls._get_collection()
-            embeddings = cls._embed_texts([item.content for item in comment_items])
         except Exception as exc:
             logger.warning("Vector upsert skipped because vector dependencies are unavailable: {}", exc)
             return 0
 
-        collection.upsert(
-            ids=[str(item.id) for item in comment_items],
-            documents=[item.content for item in comment_items],
-            metadatas=[cls._build_metadata(product, item) for item in comment_items],
-            embeddings=embeddings,
-        )
-        for item in comment_items:
-            item.is_vectorized = True
+        vectorized_count = 0
+        for batch_index, comment_batch in enumerate(
+            cls._chunk_items(comment_items, EMBEDDING_BATCH_SIZE),
+            start=1,
+        ):
+            try:
+                embeddings = cls._embed_texts([item.content for item in comment_batch])
+                collection.upsert(
+                    ids=[str(item.id) for item in comment_batch],
+                    documents=[item.content for item in comment_batch],
+                    metadatas=[cls._build_metadata(product, item) for item in comment_batch],
+                    embeddings=embeddings,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Vector upsert batch skipped: product_id={} batch_index={} batch_size={} error={}",
+                    product_id,
+                    batch_index,
+                    len(comment_batch),
+                    exc,
+                )
+                continue
+
+            for item in comment_batch:
+                item.is_vectorized = True
+            vectorized_count += len(comment_batch)
+
+        if vectorized_count == 0:
+            return 0
         logger.info(
-            "Vector store upsert completed: product_id={} comment_count={}",
+            "Vector store upsert completed: product_id={} comment_count={} batch_size={}",
             product_id,
-            len(comment_items),
+            vectorized_count,
+            EMBEDDING_BATCH_SIZE,
         )
-        return len(comment_items)
+        return vectorized_count
 
     @classmethod
     def ensure_product_vectorized(cls, db: Session, product_id: int) -> int:

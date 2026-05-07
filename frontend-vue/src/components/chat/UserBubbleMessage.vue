@@ -18,6 +18,7 @@ defineProps<{
 <style scoped>
 .message-row {
   display: flex;
+  min-width: 0;
 }
 
 .message-row-user {
@@ -26,6 +27,7 @@ defineProps<{
 
 .user-bubble {
   max-width: min(76%, 42rem);
+  min-width: 0;
   border-radius: 1.45rem;
   background: linear-gradient(135deg, #eef2ff 0%, #ffffff 100%);
   border: 1px solid rgba(199, 210, 254, 0.8);
@@ -36,6 +38,8 @@ defineProps<{
 .user-bubble__content {
   margin: 0;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   color: #111827;
   line-height: 1.7;
 }

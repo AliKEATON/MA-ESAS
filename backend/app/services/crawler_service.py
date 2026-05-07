@@ -73,16 +73,30 @@ class CrawlerService:
                 db.refresh(product)
                 return ProductStatusResponse.model_validate(product)
 
+            # 先把数据库里已有的 source_comment_id 预加载出来，
+            # 再结合本轮抓取中的 seen_source_ids 做双重去重。
+            existing_source_ids = {
+                source_comment_id
+                for (source_comment_id,) in db.query(Comment.source_comment_id).filter(
+                    Comment.product_id == product_id,
+                    Comment.source_comment_id.isnot(None),
+                ).all()
+                if source_comment_id
+            }
+            seen_source_ids: set[str] = set()
             saved_count = 0
             for comment_data in comments_data:
-                # 以 source_comment_id 去重，避免同一商品重复抓取时反复写入相同评论。
-                existing = db.query(Comment).filter(
-                    Comment.product_id == product_id,
-                    Comment.source_comment_id == comment_data.get("source_comment_id"),
-                ).first()
-                if existing:
-                    logger.debug("Comment already exists: {}", comment_data.get("source_comment_id"))
+                source_comment_id = comment_data.get("source_comment_id")
+                # 以 source_comment_id 去重，避免：
+                # 1. 数据库中已有同评论再次写入
+                # 2. 同一轮抓取结果里自身出现重复评论
+                if source_comment_id and (
+                    source_comment_id in existing_source_ids or source_comment_id in seen_source_ids
+                ):
+                    logger.debug("Comment already exists or duplicated in batch: {}", source_comment_id)
                     continue
+                if source_comment_id:
+                    seen_source_ids.add(source_comment_id)
 
                 comment = Comment(
                     product_id=product_id,
@@ -91,7 +105,7 @@ class CrawlerService:
                     dimension=comment_data.get("dimension"),
                     dimension_score=comment_data.get("dimension_score"),
                     comment_time=comment_data.get("comment_time"),
-                    source_comment_id=comment_data.get("source_comment_id"),
+                    source_comment_id=source_comment_id,
                     is_vectorized=False,
                 )
                 db.add(comment)
@@ -124,6 +138,9 @@ class CrawlerService:
 
         except Exception as e:
             logger.error(f"Crawl product error: {str(e)}")
+            # flush/commit 失败后必须先 rollback，否则当前 Session 会进入
+            # PendingRollback 状态，后续连“标记商品失败”都无法执行。
+            db.rollback()
             # 服务层只要任一步失败，就把商品状态标记为 FAILED，并保留最近错误信息。
             product.crawl_status = ProductStatus.FAILED
             product.last_crawl_error = str(e)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from datetime import timezone
 from typing import Any
 
@@ -12,28 +13,32 @@ from app.agents.master_agent import MasterAgent
 from app.agents.rag_agent import RAGAgent
 from app.agents.router_agent import RouterAgent
 from app.agents.sql_agent import SQLAgent
-from app.agents.state import MultiAgentAnalysisState
+from app.agents.state import AnalysisWorkflowRuntime, MultiAgentAnalysisState
 from app.agents.visual_agent import VisualAgent
 from app.models import Comment, Product
-from app.schemas.agent_protocol import DataContext, FinalAnalysisResponse, FinalResponseMeta, ProductContext, VisualAgentResult
+from app.schemas.agent_protocol import DataContext, ProductContext, VisualAgentResult
 
 
 class AnalysisWorkflow:
     """负责按照草案协议编排各分析 Agent 的执行顺序。"""
 
     _compiled_graph: Any = None
+    _runtime_context: ContextVar[AnalysisWorkflowRuntime | None] = ContextVar("analysis_workflow_runtime", default=None)
 
     @classmethod
-    def run(cls, state: MultiAgentAnalysisState) -> MultiAgentAnalysisState:
+    def run(cls, state: MultiAgentAnalysisState, runtime: AnalysisWorkflowRuntime) -> MultiAgentAnalysisState:
         """执行完整工作流，并返回包含最终协议结果的共享状态。"""
         initial_state = dict(state)
         initial_state.setdefault("retry_count", 0)
         initial_state.setdefault("max_retry", 1)
-        if "user_message" not in initial_state and "task" in initial_state:
-            task = initial_state["task"]
-            if getattr(task, "question", None):
-                initial_state["user_message"] = task.question
-        return cls._get_graph().invoke(initial_state)
+        if "user_message" not in initial_state and getattr(runtime.task, "question", None):
+            initial_state["user_message"] = runtime.task.question
+
+        token = cls._runtime_context.set(runtime)
+        try:
+            return cls._get_graph().invoke(initial_state)
+        finally:
+            cls._runtime_context.reset(token)
 
     @classmethod
     def _get_graph(cls) -> Any:
@@ -94,10 +99,11 @@ class AnalysisWorkflow:
         if existing is not None:
             return {"product_context": existing}
 
-        task = state.get("task")
+        runtime = AnalysisWorkflow._get_runtime()
+        task = runtime.task
         product = getattr(task, "product", None)
         product_id = getattr(task, "product_id", None)
-        resolved_from = state.get("product_resolved_from", "none")
+        resolved_from = runtime.product_resolved_from
         if product_id is None:
             if product is not None:
                 raise RuntimeError("Task product context is inconsistent: task.product exists but product_id is missing")
@@ -149,10 +155,9 @@ class AnalysisWorkflow:
                 )
             }
 
-        task = state.get("task")
-        db = state.get("db")
-        if db is None:
-            raise RuntimeError("Workflow db session is missing in ensure_product_data")
+        runtime = AnalysisWorkflow._get_runtime()
+        task = runtime.task
+        db = runtime.db
 
         product_id = product_context.product_id
         product = db.query(Product).filter(Product.id == product_id).first()
@@ -163,14 +168,11 @@ class AnalysisWorkflow:
                 f"Task product mismatch during data preparation: task.product_id={getattr(task, 'product_id', None)} product_context.product_id={product_id}"
             )
 
-        should_crawl_fn = state.get("should_crawl_fn")
-        crawl_product_fn = state.get("crawl_product_fn")
-        ensure_vector_ready_fn = state.get("ensure_vector_ready_fn")
-        should_crawl = bool(should_crawl_fn(product)) if should_crawl_fn is not None else False
+        should_crawl = bool(runtime.should_crawl_fn(product))
         crawler_triggered = False
-        if should_crawl and crawl_product_fn is not None:
+        if should_crawl:
             AnalysisWorkflow._mark_step(state, "crawling", 30)
-            crawl_product_fn(db, product_id)
+            runtime.crawl_product_fn(db, product_id)
             crawler_triggered = True
             product = db.query(Product).filter(Product.id == product_id).first()
             if product is None:
@@ -178,8 +180,8 @@ class AnalysisWorkflow:
 
         comment_count = db.query(Comment).filter(Comment.product_id == product_id).count()
         vector_ready = False
-        if comment_count > 0 and ensure_vector_ready_fn is not None:
-            vector_ready = bool(ensure_vector_ready_fn(db, product_id))
+        if comment_count > 0 and runtime.ensure_vector_ready_fn is not None:
+            vector_ready = bool(runtime.ensure_vector_ready_fn(db, product_id))
         last_crawled_at = getattr(product, "last_crawled_at", None)
         if last_crawled_at is not None and getattr(last_crawled_at, "tzinfo", None) is None:
             last_crawled_at = last_crawled_at.replace(tzinfo=timezone.utc)
@@ -227,11 +229,11 @@ class AnalysisWorkflow:
         AnalysisWorkflow._mark_step(state, "sql_agent", 60)
         product_context = state["product_context"]
         route_decision = state["route_decision"]
+        runtime = AnalysisWorkflow._get_runtime()
         result = SQLAgent.run(
-            db=state["db"],
+            db=runtime.db,
             product_id=product_context.product_id,
             question=state["user_message"],
-            analysis_targets=route_decision.analysis_targets,
         )
         return {"sql_result": result}
 
@@ -274,11 +276,11 @@ class AnalysisWorkflow:
         AnalysisWorkflow._mark_step(state, "rag_agent", 80)
         product_context = state["product_context"]
         route_decision = state["route_decision"]
+        runtime = AnalysisWorkflow._get_runtime()
         result = RAGAgent.run(
-            db=state["db"],
+            db=runtime.db,
             product_id=product_context.product_id,
             question=state["user_message"],
-            analysis_targets=route_decision.analysis_targets,
             route_reason=route_decision.reason,
             response_style=route_decision.response_style.value,
             sql_result_description=state.get("sql_result").description if state.get("sql_result") is not None else None,
@@ -329,29 +331,9 @@ class AnalysisWorkflow:
 
     @staticmethod
     def _finalize(state: MultiAgentAnalysisState) -> MultiAgentAnalysisState:
-        """收敛最终输出，生成服务层可直接消费的最终协议结果。"""
+        """标记工作流完成，最终响应由服务层统一组装。"""
         AnalysisWorkflow._mark_step(state, "finalize", 100, finished=True)
-        answer_draft = state.get("answer_draft")
-        visual_result = state.get("visual_result")
-        product_context = state.get("product_context")
-        return {
-            "final_response": FinalAnalysisResponse(
-                answer=answer_draft.answer if answer_draft is not None else "",
-                charts=visual_result.charts if visual_result is not None else [],
-                meta=FinalResponseMeta(
-                    product_id=product_context.product_id if product_context is not None else None,
-                    used_agents=[
-                        "router_agent",
-                        *(["sql_agent"] if state.get("sql_result") is not None else []),
-                        *(["visual_agent"] if visual_result is not None and visual_result.charts else []),
-                        *(["rag_agent"] if state.get("rag_result") is not None else []),
-                        "answer_agent",
-                        "master_agent",
-                    ],
-                    retry_count=state.get("retry_count", 0),
-                ),
-            )
-        }
+        return {}
 
     @staticmethod
     def _mark_step(
@@ -363,15 +345,22 @@ class AnalysisWorkflow:
         finished: bool = False,
     ) -> None:
         """通过服务层回调同步任务状态，保持异步任务进度可观测。"""
-        set_task_state_fn = state.get("set_task_state_fn")
-        task = state.get("task")
-        if set_task_state_fn is None or task is None or state.get("db") is None:
+        runtime = AnalysisWorkflow._get_runtime(optional=True)
+        if runtime is None:
             return
-        set_task_state_fn(
-            state["db"],
-            task,
+        runtime.set_task_state_fn(
+            runtime.db,
+            runtime.task,
             current_step=current_step,
             progress=progress,
             started=started,
             finished=finished,
         )
+
+    @classmethod
+    def _get_runtime(cls, *, optional: bool = False) -> AnalysisWorkflowRuntime | None:
+        """获取当前工作流运行时上下文，供节点访问数据库与服务回调。"""
+        runtime = cls._runtime_context.get()
+        if runtime is None and not optional:
+            raise RuntimeError("Analysis workflow runtime is missing")
+        return runtime

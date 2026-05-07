@@ -1,4 +1,4 @@
-"""???? Agent????????????????"""
+"""审查 Agent：对候选回答做最终质量检查并决定是否重试。"""
 
 from __future__ import annotations
 
@@ -10,26 +10,20 @@ from app.utils.logger import logger
 
 
 class MasterAgent:
-    """???????????????????????"""
+    """负责审查候选回答质量，并给出通过、重试或降级通过决策。"""
 
     _QUESTION_STOPWORDS = {
-        "?",
-        "??",
-        "??",
-        "??",
-        "??",
-        "??",
-        "??",
-        "??",
-        "??",
-        "???",
-        "??",
-        "??",
-        "???",
-        "??",
-        "??",
-        "??",
-        "??",
+        "请分析",
+        "帮我分析",
+        "分析一下",
+        "这个商品",
+        "这款商品",
+        "这个产品",
+        "这款产品",
+        "情况",
+        "如何",
+        "怎么样",
+        "是什么",
     }
 
     SYSTEM_PROMPT = """
@@ -84,7 +78,17 @@ reason 填写要求：
         retry_count: int = 0,
         max_retry: int = 1,
     ) -> MasterDecision:
-        """????????????????????????"""
+        """调用大模型执行审查，失败时回退到本地规则检查。"""
+        chart_count = len(visual_result.charts) if visual_result is not None else 0
+        logger.info(
+            "MasterAgent 开始审查：need_visual={} retry_count={} max_retry={} answer_empty={} answer_points_count={} chart_count={}",
+            route_decision.need_visual,
+            retry_count,
+            max_retry,
+            not bool(answer_text.strip()),
+            len(answer_points or []),
+            chart_count,
+        )
         payload = {
             "question": question,
             "route_decision": route_decision.model_dump(),
@@ -95,16 +99,24 @@ reason 填写要求：
             "max_retry": max_retry,
         }
         try:
-            return invoke_structured_output(
+            decision = invoke_structured_output(
                 system_prompt=MasterAgent.SYSTEM_PROMPT,
                 payload=payload,
                 schema=MasterDecision,
                 temperature=0.1,
             )
+            logger.info(
+                "MasterAgent 大模型审查完成：decision={} reason={} missing_items={} retry_from={}",
+                decision.decision.value,
+                decision.reason,
+                decision.missing_items,
+                decision.retry_from.value if decision.retry_from is not None else None,
+            )
+            return decision
         except LLMUnavailableError as exc:
-            logger.warning("MasterAgent ???????: {}", exc)
+            logger.warning("MasterAgent 大模型不可用，回退到本地规则：{}", exc)
         except Exception as exc:
-            logger.exception("MasterAgent ?????????? fallback: {}", exc)
+            logger.exception("MasterAgent 审查失败，回退到本地规则：{}", exc)
         return MasterAgent._fallback_run(
             question=question,
             route_decision=route_decision,
@@ -117,16 +129,16 @@ reason 填写要求：
 
     @staticmethod
     def _has_effective_answer_points(answer_points: list[str] | None) -> bool:
-        """??????????????????"""
+        """判断 answer_points 中是否至少包含一条有效结论。"""
         if not answer_points:
             return False
 
         weak_markers = {
-            "??",
-            "???",
-            "???",
-            "?????",
-            "???????",
+            "已分析",
+            "请查看图表",
+            "请查看结果",
+            "暂无结论",
+            "当前无结果",
         }
         effective_count = 0
         for point in answer_points:
@@ -142,7 +154,7 @@ reason 填写要求：
 
     @staticmethod
     def _extract_question_keywords(question: str) -> list[str]:
-        """???????????? fallback ????????????"""
+        """提取问题中的核心关键词，用于 fallback 判断回答是否答题。"""
         candidates = re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9]{3,}", question)
         keywords: list[str] = []
         for candidate in candidates:
@@ -154,7 +166,7 @@ reason 填写要求：
 
     @staticmethod
     def _covers_question(question: str, answer_text: str) -> bool:
-        """?????????????????????"""
+        """检查候选回答是否至少覆盖了问题中的核心关键词。"""
         normalized_answer = answer_text.strip().lower()
         if not normalized_answer:
             return False
@@ -174,34 +186,72 @@ reason 填写要求：
         retry_count: int = 0,
         max_retry: int = 1,
     ) -> MasterDecision:
-        """????????????????????????????"""
+        """使用本地规则检查缺失项，并在必要时给出重试建议。"""
         missing_items: list[str] = []
+        visual_missing = False
+        answer_missing = False
+        answer_points_missing = False
         if route_decision.need_visual and (visual_result is None or not visual_result.charts):
             missing_items.append("visual_result")
+            visual_missing = True
         if not answer_text.strip():
             missing_items.append("answer")
+            answer_missing = True
         elif not MasterAgent._covers_question(question, answer_text):
             missing_items.append("answer")
+            answer_missing = True
         if not MasterAgent._has_effective_answer_points(answer_points):
             missing_items.append("answer_points")
+            answer_points_missing = True
         if not missing_items:
-            return MasterDecision(
+            decision = MasterDecision(
                 decision=MasterDecisionType.PASS,
-                reason="??????????????????",
+                reason="当前回答已覆盖问题，结论点完整，可直接交付。",
                 missing_items=[],
                 retry_from=None,
             )
+            logger.info(
+                "MasterAgent 本地审查完成：decision={} reason={} missing_items=[]",
+                decision.decision.value,
+                decision.reason,
+            )
+            return decision
         if retry_count < max_retry:
             retry_from = RetryFromAgent.VISUAL_AGENT if "visual_result" in missing_items else RetryFromAgent.ANSWER_AGENT
-            return MasterDecision(
+            decision = MasterDecision(
                 decision=MasterDecisionType.RETRY,
-                reason="??????????????????????????",
+                reason="当前结果仍有缺失，建议局部重试补齐后再审查。",
                 missing_items=missing_items,
                 retry_from=retry_from,
             )
-        return MasterDecision(
+            logger.info(
+                "MasterAgent 本地审查完成：decision={} reason={} missing_items={} retry_from={} 图表缺失={} 回答缺失={} 结论点缺失={} retry_count={} max_retry={}",
+                decision.decision.value,
+                decision.reason,
+                decision.missing_items,
+                decision.retry_from.value if decision.retry_from is not None else None,
+                visual_missing,
+                answer_missing,
+                answer_points_missing,
+                retry_count,
+                max_retry,
+            )
+            return decision
+        decision = MasterDecision(
             decision=MasterDecisionType.FALLBACK_PASS,
-            reason="???????????????????",
+            reason="已达到最大重试次数，当前结果存在缺失但允许降级交付。",
             missing_items=missing_items,
             retry_from=None,
         )
+        logger.info(
+            "MasterAgent 本地审查完成：decision={} reason={} missing_items={} retry_from=None 图表缺失={} 回答缺失={} 结论点缺失={} retry_count={} max_retry={}",
+            decision.decision.value,
+            decision.reason,
+            decision.missing_items,
+            visual_missing,
+            answer_missing,
+            answer_points_missing,
+            retry_count,
+            max_retry,
+        )
+        return decision

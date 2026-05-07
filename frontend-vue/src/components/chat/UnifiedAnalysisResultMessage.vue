@@ -26,6 +26,10 @@ const productDisplayName = computed(() => {
   }
   return product.product_name || product.external_product_id
 })
+
+const resultStatusLabel = computed(() => {
+  return props.result.result_ready === false ? '处理中' : '已完成'
+})
 </script>
 
 <template>
@@ -35,9 +39,12 @@ const productDisplayName = computed(() => {
         <p class="analysis-result-message__eyebrow">分析已完成</p>
         <h3 class="analysis-result-message__title">{{ productDisplayName }}</h3>
       </div>
-      <span class="analysis-result-message__source">
-        {{ result.product?.source || result.product_context?.source || '--' }}
-      </span>
+      <div class="analysis-result-message__header-meta">
+        <span class="analysis-result-message__status">{{ resultStatusLabel }}</span>
+        <span class="analysis-result-message__source">
+          {{ result.product?.source || result.product_context?.source || '--' }}
+        </span>
+      </div>
     </header>
 
     <div class="analysis-result-message__collapsed-progress">
@@ -74,12 +81,15 @@ const productDisplayName = computed(() => {
 .analysis-result-message {
   display: grid;
   gap: 1.15rem;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .analysis-result-message__header {
   display: flex;
   justify-content: space-between;
   gap: 1rem;
+  min-width: 0;
 }
 
 .analysis-result-message__eyebrow {
@@ -92,6 +102,25 @@ const productDisplayName = computed(() => {
   margin: 0;
   color: #132033;
   font-size: 1.08rem;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.analysis-result-message__header-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.analysis-result-message__status {
+  border-radius: 999px;
+  background: rgba(15, 118, 110, 0.12);
+  color: #0f766e;
+  padding: 0.28rem 0.65rem;
+  font-size: 0.78rem;
+  font-weight: 600;
 }
 
 .analysis-result-message__source {
@@ -110,6 +139,7 @@ const productDisplayName = computed(() => {
 .analysis-result-message__section {
   display: grid;
   gap: 0.75rem;
+  min-width: 0;
 }
 
 .analysis-result-message__section-title {
@@ -128,12 +158,15 @@ const productDisplayName = computed(() => {
 .analysis-result-message__evidence li {
   border-left: 3px solid rgba(37, 99, 235, 0.22);
   padding-left: 0.9rem;
+  min-width: 0;
 }
 
 .analysis-result-message__evidence p {
   margin: 0.35rem 0 0;
   color: #263243;
   line-height: 1.7;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .analysis-result-message__evidence-meta {

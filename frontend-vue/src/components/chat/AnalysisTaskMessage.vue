@@ -36,6 +36,21 @@ const shouldShowResume = computed(() => {
     props.pollingState?.autoPollEnabled === false
   )
 })
+
+const statusLabelMap = {
+  pending: '待处理',
+  processing: '进行中',
+  completed: '已完成',
+  failed: '失败',
+} as const
+
+const effectiveStatusLabel = computed(() => {
+  return statusLabelMap[effectiveProgress.value.status] || effectiveProgress.value.status
+})
+
+function getStepStatusLabel(status: string) {
+  return statusLabelMap[status as keyof typeof statusLabelMap] || status
+}
 </script>
 
 <template>
@@ -45,7 +60,9 @@ const shouldShowResume = computed(() => {
         <p class="analysis-task-message__eyebrow">正在分析商品问题</p>
         <h3 class="analysis-task-message__title">{{ task.question }}</h3>
       </div>
-      <span class="analysis-task-message__status">{{ effectiveProgress.status }}</span>
+      <span class="analysis-task-message__status" :data-status="effectiveProgress.status">
+        {{ effectiveStatusLabel }}
+      </span>
     </header>
 
     <div class="analysis-task-message__progress-shell">
@@ -58,7 +75,7 @@ const shouldShowResume = computed(() => {
     <ul v-if="effectiveProgress.steps.length" class="analysis-task-message__steps">
       <li v-for="step in effectiveProgress.steps" :key="step.step">
         <span>{{ step.label }}</span>
-        <strong>{{ step.status }}</strong>
+        <strong>{{ getStepStatusLabel(step.status) }}</strong>
       </li>
     </ul>
 
@@ -77,6 +94,8 @@ const shouldShowResume = computed(() => {
 .analysis-task-message {
   display: grid;
   gap: 0.95rem;
+  min-width: 0;
+  max-width: 100%;
   border: 1px solid rgba(226, 232, 240, 0.92);
   border-radius: 1.35rem;
   background: rgba(255, 255, 255, 0.88);
@@ -88,6 +107,7 @@ const shouldShowResume = computed(() => {
   display: flex;
   justify-content: space-between;
   gap: 1rem;
+  min-width: 0;
 }
 
 .analysis-task-message__eyebrow {
@@ -101,12 +121,37 @@ const shouldShowResume = computed(() => {
   font-size: 1rem;
   line-height: 1.5;
   color: #132033;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .analysis-task-message__status {
-  color: #64748b;
-  font-size: 0.82rem;
-  text-transform: uppercase;
+  align-self: flex-start;
+  border-radius: 999px;
+  padding: 0.28rem 0.68rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.analysis-task-message__status[data-status='pending'] {
+  background: rgba(245, 158, 11, 0.14);
+  color: #b45309;
+}
+
+.analysis-task-message__status[data-status='processing'] {
+  background: rgba(37, 99, 235, 0.12);
+  color: #2563eb;
+}
+
+.analysis-task-message__status[data-status='completed'] {
+  background: rgba(15, 118, 110, 0.12);
+  color: #0f766e;
+}
+
+.analysis-task-message__status[data-status='failed'] {
+  background: rgba(220, 38, 38, 0.12);
+  color: #b91c1c;
 }
 
 .analysis-task-message__progress-shell {
@@ -126,6 +171,8 @@ const shouldShowResume = computed(() => {
   margin: 0;
   color: #475569;
   font-size: 0.92rem;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .analysis-task-message__steps {

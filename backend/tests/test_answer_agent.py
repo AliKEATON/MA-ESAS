@@ -24,7 +24,6 @@ def _build_route_decision(response_style: ResponseStyle = ResponseStyle.PROFESSI
         need_sql=True,
         need_rag=False,
         need_visual=False,
-        analysis_targets=["bad_review_rate"],
         response_style=response_style,
         reason="测试 answer_agent 使用",
     )
@@ -166,6 +165,23 @@ def test_answer_agent_fallback_prefers_rag_insight_points(monkeypatch):
     ]
 
 
+def test_answer_agent_fallback_uses_neutral_default_message_when_no_points(monkeypatch):
+    def fake_invoke_structured_output(*, system_prompt, payload, schema, temperature):
+        raise LLMUnavailableError("force fallback")
+
+    monkeypatch.setattr("app.agents.answer_agent.invoke_structured_output", fake_invoke_structured_output)
+
+    result = AnswerAgent.run(
+        question="请帮我分析一下",
+        route_decision=_build_route_decision(ResponseStyle.PROFESSIONAL_ANALYSIS),
+    )
+
+    assert result.answer_points == [
+        "针对“请帮我分析一下”，当前未产出足够的分析结果，建议稍后重试或补充更明确的问题信息。"
+    ]
+    assert "补充商品上下文" not in result.answer
+
+
 def test_workflow_answer_agent_passes_user_message(monkeypatch):
     route_decision = _build_route_decision()
 
@@ -196,7 +212,6 @@ def test_answer_agent_with_real_llm():
         need_sql=True,
         need_rag=True,
         need_visual=True,
-        analysis_targets=["bad_review_rate", "bad_review_distribution"],
         response_style=ResponseStyle.PROFESSIONAL_ANALYSIS,
         reason="用户要求分析差评并给出图表说明。",
     )

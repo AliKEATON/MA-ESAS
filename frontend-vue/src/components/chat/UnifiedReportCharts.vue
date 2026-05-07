@@ -26,6 +26,8 @@ const props = defineProps<{
   charts: FinalResponseChart[]
 }>()
 
+const SERIES_COLORS = ['#2563eb', '#38bdf8', '#0f766e', '#f59e0b', '#ef4444', '#8b5cf6']
+
 /** 将新版 final_response.charts 转成前端图表渲染配置。 */
 const chartEntries = computed(() => {
   return props.charts.map((chart) => {
@@ -62,12 +64,19 @@ function buildAxisOption(chart: FinalResponseChart) {
   }
 
   const supportsNumericAxis = chart.chart_type === 'scatter'
+  const isStackedBar = chart.chart_type === 'stacked_bar'
   const xAxisData = supportsNumericAxis ? undefined : chart.x_axis
 
   return {
     tooltip: { trigger: chart.chart_type === 'scatter' ? 'item' : 'axis' },
-    legend: chart.series.length > 1 ? {} : undefined,
-    grid: { left: 36, right: 18, top: 40, bottom: 24, containLabel: true },
+    legend: chart.series.length > 1 ? { bottom: 0, textStyle: { color: '#60708c' } } : undefined,
+    grid: {
+      left: 36,
+      right: 18,
+      top: 40,
+      bottom: chart.series.length > 1 ? 64 : 24,
+      containLabel: true,
+    },
     xAxis: {
       type: supportsNumericAxis ? 'value' : 'category',
       data: xAxisData,
@@ -92,9 +101,10 @@ function buildAxisOption(chart: FinalResponseChart) {
       smooth: chart.chart_type === 'line',
       symbolSize: chart.chart_type === 'scatter' ? 12 : undefined,
       areaStyle: chart.chart_type === 'line' ? { opacity: 0.08 } : undefined,
+      barMaxWidth: isStackedBar ? 42 : undefined,
       itemStyle: {
-        color: index === 0 ? '#2f6fed' : '#38bdf8',
-        borderRadius: chart.chart_type === 'bar' || chart.chart_type === 'stacked_bar' ? [8, 8, 0, 0] : undefined,
+        color: SERIES_COLORS[index % SERIES_COLORS.length],
+        borderRadius: chart.chart_type === 'bar' ? [8, 8, 0, 0] : undefined,
       },
     })),
   }
@@ -197,6 +207,9 @@ function toEchartsSeriesType(chartType: FinalResponseChart['chart_type']) {
 .report-charts {
   display: grid;
   gap: 0.95rem;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
 }
 
 .report-chart {
@@ -204,6 +217,8 @@ function toEchartsSeriesType(chartType: FinalResponseChart['chart_type']) {
   border-radius: 1.2rem;
   background: rgba(255, 255, 255, 0.92);
   padding: 1rem 1rem 0.8rem;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .report-chart__header {
@@ -211,9 +226,12 @@ function toEchartsSeriesType(chartType: FinalResponseChart['chart_type']) {
   font-size: 0.94rem;
   font-weight: 600;
   color: #0f172a;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .report-chart__canvas {
   height: 18rem;
+  max-width: 100%;
 }
 </style>

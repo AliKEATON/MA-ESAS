@@ -14,7 +14,6 @@ from app.schemas.agent_protocol import (
     ChartSpec,
     DataContext,
     FinalAnalysisResponse,
-    FinalResponseMeta,
     MasterDecision,
     MasterDecisionType,
     ProductContext,
@@ -218,11 +217,6 @@ def test_upsert_report_from_workflow_persists_full_workflow_state(monkeypatch):
             missing_items=[],
             retry_from=None,
         ),
-        "final_response": FinalAnalysisResponse(
-            answer="这是最终回答",
-            charts=[],
-            meta=FinalResponseMeta(product_id=88, used_agents=["router_agent", "sql_agent"], retry_count=1),
-        ),
         "retry_count": 1,
     }
 
@@ -237,6 +231,152 @@ def test_upsert_report_from_workflow_persists_full_workflow_state(monkeypatch):
     assert report.statistics_json["master_decision"]["decision"] == "pass"
     assert report.statistics_json["retry_count"] == 1
     assert report.evidence_json[0]["dimension"] == "物流"
+    assert report.statistics_json["final_response"]["answer"] == "这是最终回答"
+    assert report.statistics_json["final_response"]["meta"]["product_id"] == 88
+
+
+def test_build_final_response_uses_workflow_outputs():
+    workflow_state = {
+        "product_context": ProductContext(
+            has_product=True,
+            source="jd",
+            external_product_id="SKU-001",
+            product_id=88,
+            resolved_from="bound_product",
+        ),
+        "sql_result": SQLAgentResult(
+            tool_calls=[{"tool": "get_bad_review_rate", "args": {"product_id": 88}}],
+            metrics={"bad_review_rate": 0.2},
+            description="该商品差评率约为20%。",
+        ),
+        "visual_result": VisualAgentResult(
+            charts=[
+                ChartSpec(
+                    chart_id="chart_bad_review_distribution",
+                    chart_type=SupportedChartType.PIE,
+                    title="差评维度分布",
+                    description="展示差评在不同维度上的占比。",
+                    x_axis=[],
+                    series=[ChartSeries(name="差评数量", data=[{"name": "物流", "value": 3}])],
+                )
+            ]
+        ),
+        "rag_result": RAGAgentResult(
+            queries=["商品差评原因"],
+            evidence=[],
+            insight="评论语义显示问题主要集中在物流。",
+        ),
+        "answer_draft": AnswerDraft(
+            answer="这是最终回答",
+            answer_points=["该商品差评率约为20%。"],
+        ),
+        "retry_count": 1,
+    }
+
+    final_response = AnalysisService._build_final_response(workflow_state)
+
+    assert isinstance(final_response, FinalAnalysisResponse)
+    assert final_response.answer == "这是最终回答"
+    assert final_response.meta.product_id == 88
+    assert final_response.meta.retry_count == 1
+    assert final_response.meta.used_agents == [
+        "router_agent",
+        "sql_agent",
+        "visual_agent",
+        "rag_agent",
+        "answer_agent",
+        "master_agent",
+    ]
+    assert final_response.charts[0].title == "差评维度分布"
+
+
+def test_process_task_marks_task_failed_and_records_error_message(monkeypatch):
+    task = SimpleNamespace(
+        task_id="task-failed-001",
+        product_id=88,
+        conversation_id=7,
+        question="请分析差评原因",
+        status=AnalysisTaskStatus.PENDING,
+        current_step="rag_agent",
+        progress=80,
+    )
+
+    class _FakeTaskQuery:
+        """只为 process_task 提供任务查询结果。"""
+
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def first(self):
+            return task
+
+    class _FakeDb:
+        """模拟最小数据库会话，供失败链路测试使用。"""
+
+        def query(self, _model):
+            return _FakeTaskQuery()
+
+        def close(self):
+            return None
+
+    fake_db = _FakeDb()
+    captured: dict[str, object] = {}
+
+    def fake_set_task_state(db, target_task, **kwargs):
+        """记录失败写回参数，验证异常会落到任务状态中。"""
+        captured["db"] = db
+        captured["task"] = target_task
+        captured["kwargs"] = kwargs
+        target_task.status = kwargs.get("status", target_task.status)
+        target_task.current_step = kwargs.get("current_step", target_task.current_step)
+        target_task.progress = kwargs.get("progress", target_task.progress)
+        target_task.error_message = kwargs.get("error_message")
+        return target_task
+
+    monkeypatch.setattr("app.services.analysis_service.SessionLocal", lambda: fake_db)
+    monkeypatch.setattr(
+        "app.services.analysis_service.AnalysisWorkflow.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("向量检索失败")),
+    )
+    monkeypatch.setattr(AnalysisService, "_set_task_state", fake_set_task_state)
+    monkeypatch.setattr(
+        AnalysisService,
+        "_upsert_failure_message",
+        lambda db, target_task, message: captured.setdefault("failure_message", message),
+    )
+
+    AnalysisService.process_task("task-failed-001")
+
+    assert captured["task"] is task
+    assert captured["kwargs"]["status"] == AnalysisTaskStatus.FAILED
+    assert captured["kwargs"]["current_step"] == "rag_agent"
+    assert captured["kwargs"]["progress"] == 80
+    assert captured["kwargs"]["error_message"] == "向量检索失败"
+    assert captured["failure_message"] == "向量检索失败"
+
+
+def test_failed_task_progress_and_result_expose_error_message(monkeypatch):
+    task = SimpleNamespace(
+        task_id="task-failed-002",
+        status=AnalysisTaskStatus.FAILED,
+        progress=80,
+        current_step="rag_agent",
+        error_message="向量检索失败",
+        report=None,
+    )
+
+    monkeypatch.setattr(AnalysisService, "get_task_by_task_id", lambda db, user_id, task_id: task)
+
+    progress = AnalysisService.get_task_progress(db=None, user_id=1, task_id="task-failed-002")
+    result = AnalysisService.get_task_result(db=None, user_id=1, task_id="task-failed-002")
+
+    assert progress["status"] == "failed"
+    assert progress["current_step"] == "rag_agent"
+    assert progress["error_message"] == "向量检索失败"
+    assert result["result_ready"] is False
+    assert result["status"] == "failed"
+    assert result["current_step"] == "rag_agent"
+    assert result["error_message"] == "向量检索失败"
 
 
 @pytest.mark.skipif(not DEEPSEEK_API_KEY, reason="DEEPSEEK_API_KEY 未配置，跳过真实大模型测试")

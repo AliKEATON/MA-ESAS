@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, TypeVar
 
-from app.config import DEEPSEEK_API_BASE, DEEPSEEK_API_KEY, DEEPSEEK_MODEL
+from app.config import DEEPSEEK_API_BASE, DEEPSEEK_API_KEY, DEEPSEEK_MODEL, LLM_TIMEOUT_SECONDS
 from app.utils.logger import logger
 
 SchemaT = TypeVar("SchemaT")
@@ -31,7 +31,7 @@ def get_chat_model(*, temperature: float = 0.1):
         base_url=DEEPSEEK_API_BASE,
         model=DEEPSEEK_MODEL,
         temperature=temperature,
-        timeout=60,
+        timeout=LLM_TIMEOUT_SECONDS,
         max_retries=1,
     )
 

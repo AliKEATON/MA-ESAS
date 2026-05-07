@@ -75,11 +75,13 @@ CHROMADB_PATH = _resolve_storage_path(
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_API_BASE = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com/v1")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "60"))
 
 # Embedding 模型
 EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", DEEPSEEK_API_KEY)
 EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", DEEPSEEK_API_BASE)
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", 32))
 
 # ========== 爬虫配置 ==========
 JD_CRAWLER_TIMEOUT = int(os.getenv("JD_CRAWLER_TIMEOUT", 30))
@@ -94,6 +96,7 @@ JD_CRAWLER_USE_SYSTEM_USER_PATH = os.getenv("JD_CRAWLER_USE_SYSTEM_USER_PATH", "
 JD_CRAWLER_USER_DATA_PATH = os.getenv("JD_CRAWLER_USER_DATA_PATH", "").strip()
 JD_CRAWLER_PROFILE = os.getenv("JD_CRAWLER_PROFILE", "Default").strip() or "Default"
 JD_CRAWLER_LOCAL_PORT = int(os.getenv("JD_CRAWLER_LOCAL_PORT", "0") or 0)
+JD_CRAWLER_DEBUG_ADDRESS = os.getenv("JD_CRAWLER_DEBUG_ADDRESS", "").strip()
 
 # ========== 邮件配置 ==========
 SMTP_SERVER = os.getenv("SMTP_SERVER", "")

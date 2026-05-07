@@ -1,8 +1,13 @@
-import axios, { AxiosError } from 'axios'
+﻿import axios, { AxiosError } from 'axios'
 
 import type { ApiResponse } from '@/types/api'
 
 const TOKEN_STORAGE_KEY = 'ma_esas_token'
+
+type ValidationDetailItem = {
+  loc?: Array<string | number>
+  msg?: string
+}
 
 export class ApiClientError extends Error {
   statusCode: number
@@ -12,6 +17,51 @@ export class ApiClientError extends Error {
     this.name = 'ApiClientError'
     this.statusCode = statusCode
   }
+}
+
+/** 将后端错误对象转换成可读文本。 */
+function formatErrorMessage(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object') {
+    return null
+  }
+
+  if ('detail' in payload) {
+    const detail = payload.detail
+    if (typeof detail === 'string') {
+      return detail
+    }
+
+    if (Array.isArray(detail)) {
+      const messages = detail
+        .map((item) => {
+          const validationItem = item as ValidationDetailItem | null
+          if (!validationItem || typeof validationItem !== 'object') {
+            return null
+          }
+
+          const fieldName = Array.isArray(validationItem.loc)
+            ? String(validationItem.loc[validationItem.loc.length - 1] || '')
+            : ''
+
+          if (fieldName === 'current_password' || fieldName === 'new_password') {
+            return '密码长度不能少于 6 位。'
+          }
+
+          return validationItem.msg || null
+        })
+        .filter((message): message is string => Boolean(message))
+
+      if (messages.length > 0) {
+        return Array.from(new Set(messages)).join(' ')
+      }
+    }
+  }
+
+  if ('message' in payload && typeof payload.message === 'string') {
+    return payload.message
+  }
+
+  return null
 }
 
 /** 创建统一的 Axios 实例，并处理鉴权与错误转换。 */
@@ -30,7 +80,7 @@ apiClient.interceptors.request.use((config) => {
 
 apiClient.interceptors.response.use(
   (response) => response,
-  (error: AxiosError<ApiResponse<unknown> | { detail?: string }>) => {
+  (error: AxiosError<ApiResponse<unknown> | { detail?: unknown; message?: string }>) => {
     if (error.response?.status === 401) {
       localStorage.removeItem(TOKEN_STORAGE_KEY)
       if (window.location.pathname !== '/auth') {
@@ -39,11 +89,7 @@ apiClient.interceptors.response.use(
     }
 
     const payload = error.response?.data
-    const message =
-      (typeof payload === 'object' && payload && 'detail' in payload && payload.detail) ||
-      (typeof payload === 'object' && payload && 'message' in payload && payload.message) ||
-      error.message ||
-      '请求失败'
+    const message = formatErrorMessage(payload) || error.message || '请求失败'
 
     return Promise.reject(new ApiClientError(String(message), error.response?.status || 500))
   },

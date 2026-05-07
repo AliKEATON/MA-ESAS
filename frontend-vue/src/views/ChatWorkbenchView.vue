@@ -312,11 +312,13 @@ onBeforeUnmount(() => {
   grid-template-rows: auto 1fr;
   gap: 0.85rem;
   overflow: hidden;
+  min-width: 0;
 }
 
 .chat-workbench__messages-shell {
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 0.4rem 0 1.4rem;
 }
 

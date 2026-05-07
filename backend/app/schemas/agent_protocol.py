@@ -66,7 +66,6 @@ class RouteDecision(BaseModel):
     need_sql: bool
     need_rag: bool
     need_visual: bool
-    analysis_targets: list[str] = Field(default_factory=list)
     response_style: ResponseStyle
     reason: str
 

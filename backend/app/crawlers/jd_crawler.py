@@ -21,6 +21,7 @@ from app.crawlers.base_crawler import BaseCrawler
 from app.crawlers.data_cleaner import DataCleaner
 from app.config import (
     JD_CRAWLER_BROWSER_PATH,
+    JD_CRAWLER_DEBUG_ADDRESS,
     JD_CRAWLER_LOCAL_PORT,
     JD_CRAWLER_PROFILE,
     JD_CRAWLER_TIMEOUT,
@@ -37,6 +38,14 @@ class JDCrawler(BaseCrawler):
     JD_PRODUCT_URL_PATTERN = r"item\.jd\.com/(\d+)\.html"
     JD_BLOCKED_URL_KEYWORDS = ("reason=403", "from=pc_item")
     JD_COMMENT_ENTRY_XPATH = "xpath://*[@id='comment-root']/div[3]/div"
+    JD_COMMENT_ROOT_XPATH = "xpath://*[@id='comment-root']"
+    JD_COMMENT_ENTRY_CANDIDATES = (
+        "css:#comment-root > div.all-btn > div",
+        "xpath:///html/body/div[1]/div/div[3]/div[3]/div[2]/div[1]/div/div[3]/div[2]/div[1]/div[1]/div[1]/div[3]/div",
+        "xpath://*[@id='comment-root']/div[3]/div",
+        "xpath://*[@id='comment-root']//*[contains(text(),'全部评论')]",
+        "xpath://*[@id='comment-root']//*[contains(text(),'查看全部评论')]",
+    )
     JD_COMMENT_SCROLL_TARGETS = (
         "xpath://*[@id='comment-root']//div[contains(@class,'comment-item')]",
         "xpath://*[@id='comment-root']//div[contains(text(),'最新')]",
@@ -65,26 +74,31 @@ class JDCrawler(BaseCrawler):
             options = ChromiumOptions().headless(self.headless)
             options.set_user_agent(JD_CRAWLER_USER_AGENT)
 
-            if JD_CRAWLER_BROWSER_PATH:
-                options.set_browser_path(JD_CRAWLER_BROWSER_PATH)
-
-            if JD_CRAWLER_USE_SYSTEM_USER_PATH:
-                options.use_system_user_path(True)
-            elif JD_CRAWLER_USER_DATA_PATH:
-                options.set_user_data_path(JD_CRAWLER_USER_DATA_PATH)
-
-            if JD_CRAWLER_PROFILE:
-                options.set_user(JD_CRAWLER_PROFILE)
-
-            if JD_CRAWLER_LOCAL_PORT > 0:
-                options.set_local_port(JD_CRAWLER_LOCAL_PORT)
+            if JD_CRAWLER_DEBUG_ADDRESS:
+                # 已有调试浏览器模式：直接附着到用户手工启动并登录好的 Chrome。
+                options.set_address(JD_CRAWLER_DEBUG_ADDRESS)
             else:
-                options.auto_port(True)
+                if JD_CRAWLER_BROWSER_PATH:
+                    options.set_browser_path(JD_CRAWLER_BROWSER_PATH)
+
+                if JD_CRAWLER_USE_SYSTEM_USER_PATH:
+                    options.use_system_user_path(True)
+                elif JD_CRAWLER_USER_DATA_PATH:
+                    options.set_user_data_path(JD_CRAWLER_USER_DATA_PATH)
+
+                if JD_CRAWLER_PROFILE:
+                    options.set_user(JD_CRAWLER_PROFILE)
+
+                if JD_CRAWLER_LOCAL_PORT > 0:
+                    options.set_local_port(JD_CRAWLER_LOCAL_PORT)
+                else:
+                    options.auto_port(True)
 
             self.page = ChromiumPage(options)
             logger.info(
-                "Browser page initialized: headless={} profile={} use_system_user_path={} user_data_path={} browser_path={}",
+                "Browser page initialized: headless={} debug_address={} profile={} use_system_user_path={} user_data_path={} browser_path={}",
                 self.headless,
+                JD_CRAWLER_DEBUG_ADDRESS or "auto",
                 JD_CRAWLER_PROFILE,
                 JD_CRAWLER_USE_SYSTEM_USER_PATH,
                 JD_CRAWLER_USER_DATA_PATH or "default",
@@ -140,9 +154,8 @@ class JDCrawler(BaseCrawler):
             self._raise_if_blocked(url)
             logger.info(f"进入产品页面: {url}")
             self.page.wait.doc_loaded()
-            # 商品页主文档加载完成不代表评论区域已经稳定，额外等待评论根节点出现。
-            self.page.ele("xpath://*[@id='comment-root']", timeout=10)
-            sleep(1.5)
+            # 商品页主文档加载完成不代表评论区域已经稳定，这里先等待评论模块出现。
+            self._wait_for_comment_root()
             self.page.listen.start(
                 targets=self.JD_COMMENT_REQUEST_URL,
                 method="POST",
@@ -281,10 +294,16 @@ class JDCrawler(BaseCrawler):
         last_error: Optional[Exception] = None
         for attempt in range(1, 4):
             try:
-                self.page.run_js("window.scrollTo(0, document.body.scrollHeight * 0.7);")
-                sleep(1.2)
+                comment_root = self._wait_for_comment_root()
+                if not comment_root:
+                    raise RuntimeError("JD comment root not found")
 
-                entry_button = self.page.ele(self.JD_COMMENT_ENTRY_XPATH, timeout=6)
+                comment_root.scroll.to_see()
+                sleep(1)
+                self.page.run_js("window.scrollBy(0, 500);")
+                sleep(1)
+
+                entry_button = self._find_comment_entry()
                 if not entry_button:
                     raise RuntimeError("JD comment entry button not found")
 
@@ -292,7 +311,7 @@ class JDCrawler(BaseCrawler):
                 sleep(0.8)
 
                 # 页面滚动后可能触发重渲染，点击前重新定位一次，避免操作失效元素。
-                entry_button = self.page.ele(self.JD_COMMENT_ENTRY_XPATH, timeout=3)
+                entry_button = self._find_comment_entry(timeout=3)
                 if not entry_button:
                     raise RuntimeError("JD comment entry button lost after scroll")
 
@@ -309,6 +328,21 @@ class JDCrawler(BaseCrawler):
                 sleep(1)
 
         raise RuntimeError(f"JD comment entry button click failed: {last_error}")
+
+    def _wait_for_comment_root(self, timeout: int = 15):
+        """等待评论模块根节点出现并可见。"""
+        root = self.page.ele(self.JD_COMMENT_ROOT_XPATH, timeout=timeout)
+        if root:
+            sleep(1.2)
+        return root
+
+    def _find_comment_entry(self, timeout: int = 6):
+        """优先使用已验证 XPath，失败后回退到文本候选。"""
+        for locator in self.JD_COMMENT_ENTRY_CANDIDATES:
+            element = self.page.ele(locator, timeout=timeout)
+            if element:
+                return element
+        return None
 
     def _scroll_comment_page(self) -> None:
         """在评论页持续向下滚动，触发下一批评论接口请求。"""

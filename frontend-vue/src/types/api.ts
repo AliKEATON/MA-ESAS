@@ -20,6 +20,10 @@ export type AuthResponse = {
   expires_in: number
 }
 
+export type PasswordChangeResponse = {
+  success: boolean
+}
+
 export type AnalysisTaskStatus = 'pending' | 'processing' | 'completed' | 'failed'
 export type AnalysisStepStatus = 'pending' | 'processing' | 'completed' | 'failed'
 export type MessageRole = 'user' | 'assistant' | 'system'
@@ -137,6 +141,8 @@ export type FinalResponsePayload = {
   meta?: Record<string, unknown> | null
 }
 
+export type VisualizationChart = FinalResponseChart
+
 export type AnalysisResultResponse = {
   report_id: number
   task_id: string
@@ -155,4 +161,91 @@ export type AnalysisResultResponse = {
   evidence: AnalysisEvidenceItem[]
   created_at: string
   result_ready?: boolean
+}
+
+export type ProductVisualizationOverview = {
+  total_count: number
+  avg_score: number
+  bad_review_rate: number
+  positive_review_rate: number
+  score_band_distribution: {
+    positive: number
+    neutral: number
+    negative: number
+  }
+  summary_text: string
+}
+
+export type ProductVisualizationDimensionAnalysis = {
+  dimension_stats: Record<
+    string,
+    {
+      comment_count: number
+      avg_score: number
+      bad_review_rate: number
+      bad_review_count: number
+    }
+  >
+  dimension_rankings: Record<string, Array<Record<string, string | number>>>
+  dimension_coverage: Record<string, number>
+  dimension_score_distribution: Record<string, Record<string, number>>
+  best_dimension?: string | null
+  weakest_dimension?: string | null
+  most_discussed_dimension?: string | null
+}
+
+export type ProductVisualizationRiskAnalysis = {
+  bad_review_distribution: Record<string, number>
+  low_score_dimension_pairs: Array<{ dimension: string; bad_count: number }>
+  dimension_polarization: Record<
+    string,
+    {
+      avg_score: number
+      high_score_ratio: number
+      low_score_ratio: number
+      polarization_index: number
+    }
+  >
+  high_risk_dimensions: string[]
+  polarized_dimensions: string[]
+}
+
+export type ProductVisualizationTrendAnalysis = {
+  monthly_score_trend: Array<{
+    month: string
+    comment_count: number
+    avg_score: number
+    bad_review_rate: number
+    bad_review_count: number
+  }>
+  comment_length_stats: {
+    avg_length: number
+    median_length: number
+    long_comment_count: number
+    short_comment_count: number
+    total_count: number
+  }
+  trend_summary: string
+}
+
+export type ProductVisualizationSuggestions = {
+  strengths: string[]
+  risks: string[]
+  purchase_advice: string
+  recommendation_level: string
+  suitable_for: string[]
+}
+
+export type ProductVisualizationResponse = {
+  exists: boolean
+  has_data: boolean
+  reason: string | null
+  product: AnalysisProductResponse | null
+  overview: ProductVisualizationOverview | null
+  dimension_analysis: ProductVisualizationDimensionAnalysis | null
+  risk_analysis: ProductVisualizationRiskAnalysis | null
+  trend_analysis: ProductVisualizationTrendAnalysis | null
+  suggestions: ProductVisualizationSuggestions | null
+  charts: VisualizationChart[]
+  raw_metrics: Record<string, unknown> | null
 }

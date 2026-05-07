@@ -1,15 +1,15 @@
-import { createRouter, createWebHistory } from 'vue-router'
+﻿import { createRouter, createWebHistory } from 'vue-router'
 
 import { TOKEN_STORAGE_KEY } from '@/api/client'
 import AuthWorkspaceView from '@/views/AuthWorkspaceView.vue'
-import ChatWorkbenchView from '@/views/ChatWorkbenchView.vue'
+import ChatProfileWorkbenchView from '@/views/ChatProfileWorkbenchView.vue'
 
 const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/', redirect: '/chat' },
     { path: '/auth', name: 'auth', component: AuthWorkspaceView, meta: { requiresGuest: true } },
-    { path: '/chat', name: 'chat', component: ChatWorkbenchView, meta: { requiresAuth: true } },
+    { path: '/chat', name: 'chat', component: ChatProfileWorkbenchView, meta: { requiresAuth: true } },
   ],
 })
 
